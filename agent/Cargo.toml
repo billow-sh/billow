@@ -1,0 +1,9 @@
+[package]
+name = "billow-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+billow-api.workspace = true
+tokio.workspace = true
+tonic.workspace = true
