@@ -1,4 +1,5 @@
 mod install;
+mod paths;
 mod system;
 mod systemd;
 
@@ -10,8 +11,8 @@ fn main() -> ExitCode {
         Ok(()) => {
             println!(
                 "{} installed and started as {}",
-                install::AGENT_BINARY_NAME,
-                systemd::SERVICE_NAME
+                paths::AGENT_BINARY_NAME,
+                paths::SERVICE_NAME
             );
             ExitCode::SUCCESS
         }

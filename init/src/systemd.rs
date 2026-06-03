@@ -1,21 +1,19 @@
-use crate::install::AGENT_INSTALL_PATH;
+use crate::paths;
 use crate::system;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-
-pub(crate) const SERVICE_NAME: &str = "billow-agent.service";
-
-const SERVICE_PATH: &str = "/etc/systemd/system/billow-agent.service";
-const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
-const SYSTEMD_RUNTIME_DIR: &str = "/run/systemd/system";
 
 pub(crate) fn ensure_available() -> io::Result<()> {
-    if !Path::new(SYSTEMD_UNIT_DIR).is_dir() {
+    let systemd_unit_dir = paths::systemd_unit_dir();
+
+    if !systemd_unit_dir.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("systemd unit directory {SYSTEMD_UNIT_DIR} does not exist"),
+            format!(
+                "systemd unit directory {} does not exist",
+                paths::display(&systemd_unit_dir)
+            ),
         ));
     }
 
@@ -26,10 +24,15 @@ pub(crate) fn ensure_available() -> io::Result<()> {
         ));
     }
 
-    if !Path::new(SYSTEMD_RUNTIME_DIR).is_dir() {
+    let systemd_runtime_dir = paths::systemd_runtime_dir();
+
+    if !systemd_runtime_dir.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("systemd runtime directory {SYSTEMD_RUNTIME_DIR} does not exist"),
+            format!(
+                "systemd runtime directory {} does not exist",
+                paths::display(&systemd_runtime_dir)
+            ),
         ));
     }
 
@@ -37,10 +40,12 @@ pub(crate) fn ensure_available() -> io::Result<()> {
 }
 
 pub(crate) fn ensure_service_not_installed() -> io::Result<()> {
-    if Path::new(SERVICE_PATH).exists() {
+    let service_path = paths::service_path();
+
+    if service_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!("{SERVICE_PATH} already exists"),
+            format!("{} already exists", paths::display(&service_path)),
         ));
     }
 
@@ -48,28 +53,36 @@ pub(crate) fn ensure_service_not_installed() -> io::Result<()> {
 }
 
 pub(crate) fn install_unit() -> io::Result<()> {
+    let service_path = paths::service_path();
+
     let mut unit = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(SERVICE_PATH)
+        .open(&service_path)
         .map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("failed to create {SERVICE_PATH}: {error}"),
+                format!(
+                    "failed to create {}: {error}",
+                    paths::display(&service_path)
+                ),
             )
         })?;
 
     unit.write_all(service_unit().as_bytes()).map_err(|error| {
         io::Error::new(
             error.kind(),
-            format!("failed to write {SERVICE_PATH}: {error}"),
+            format!("failed to write {}: {error}", paths::display(&service_path)),
         )
     })?;
 
-    fs::set_permissions(SERVICE_PATH, fs::Permissions::from_mode(0o644)).map_err(|error| {
+    fs::set_permissions(&service_path, fs::Permissions::from_mode(0o644)).map_err(|error| {
         io::Error::new(
             error.kind(),
-            format!("failed to set permissions on {SERVICE_PATH}: {error}"),
+            format!(
+                "failed to set permissions on {}: {error}",
+                paths::display(&service_path)
+            ),
         )
     })?;
 
@@ -81,10 +94,12 @@ pub(crate) fn reload() -> io::Result<()> {
 }
 
 pub(crate) fn enable_and_start_service() -> io::Result<()> {
-    system::run_command("systemctl", &["enable", "--now", SERVICE_NAME])
+    system::run_command("systemctl", &["enable", "--now", paths::SERVICE_NAME])
 }
 
 fn service_unit() -> String {
+    let agent_install_path = paths::agent_install_path();
+
     format!(
         "\
 [Unit]
@@ -93,13 +108,14 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={AGENT_INSTALL_PATH}
+ExecStart={}
 Restart=on-failure
 RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
-"
+",
+        paths::display(&agent_install_path)
     )
 }
 
@@ -112,7 +128,7 @@ mod tests {
         let unit = service_unit();
 
         assert!(unit.contains("Description=Billow Agent"));
-        assert!(unit.contains(&format!("ExecStart={AGENT_INSTALL_PATH}")));
+        assert!(unit.contains("ExecStart="));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=multi-user.target"));
     }

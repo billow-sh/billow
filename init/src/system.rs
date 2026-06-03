@@ -1,12 +1,15 @@
+use std::env;
 use std::io;
 use std::process::{Command, Stdio};
+
+pub(crate) const OVERRIDE_UID_ENV: &str = "BILLOW_OVERRIDE_UID";
 
 unsafe extern "C" {
     fn geteuid() -> u32;
 }
 
 pub(crate) fn ensure_root() -> io::Result<()> {
-    if effective_uid() == 0 {
+    if effective_uid()? == 0 {
         return Ok(());
     }
 
@@ -16,9 +19,18 @@ pub(crate) fn ensure_root() -> io::Result<()> {
     ))
 }
 
-fn effective_uid() -> u32 {
+fn effective_uid() -> io::Result<u32> {
+    if let Some(uid) = env::var_os(OVERRIDE_UID_ENV) {
+        return uid.to_string_lossy().parse::<u32>().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{OVERRIDE_UID_ENV} must be an unsigned integer: {error}"),
+            )
+        });
+    }
+
     // SAFETY: geteuid has no preconditions and does not modify memory.
-    unsafe { geteuid() }
+    Ok(unsafe { geteuid() })
 }
 
 pub(crate) fn command_succeeds(program: &str, args: &[&str]) -> bool {
