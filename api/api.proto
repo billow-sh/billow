@@ -2,8 +2,14 @@ syntax = "proto3";
 
 package billow.api.v1;
 
+import "google/protobuf/empty.proto";
+
 service EchoService {
   rpc Echo(EchoRequest) returns (EchoResponse);
+}
+
+service TaskService {
+  rpc Run(RunRequest) returns (google.protobuf.Empty);
 }
 
 message EchoRequest {
@@ -12,4 +18,8 @@ message EchoRequest {
 
 message EchoResponse {
   string message = 1;
+}
+
+message RunRequest {
+  string image = 1;
 }

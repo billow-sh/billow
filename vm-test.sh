@@ -97,7 +97,7 @@ fi
 echo "Testing billow-agent at $vm_ip" >&2
 actual=""
 for _ in {1..30}; do
-    if actual="$(BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- "$message" 2>/dev/null)"; then
+    if actual="$(BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- echo "$message" 2>/dev/null)"; then
         if [[ "$actual" == "$message" ]]; then
             printf '%s\n' "$actual"
             exit 0
