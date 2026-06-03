@@ -17,7 +17,7 @@ impl EchoService for EchoAgent {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "127.0.0.1:50051".parse()?;
+    let addr = "0.0.0.0:50051".parse()?;
 
     Server::builder()
         .add_service(EchoServiceServer::new(EchoAgent))

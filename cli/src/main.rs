@@ -7,7 +7,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .expect("expected a message as the first argument");
 
-    let mut client = EchoServiceClient::connect("http://127.0.0.1:50051").await?;
+    let agent_ip = std::env::var("BILLOW_AGENT_IP").unwrap_or_else(|_| String::from("127.0.0.1"));
+    let mut client = EchoServiceClient::connect(format!("http://{agent_ip}:50051")).await?;
     let response = client.echo(EchoRequest { message }).await?;
 
     println!("{}", response.into_inner().message);
