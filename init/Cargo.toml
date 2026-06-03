@@ -1,0 +1,6 @@
+[package]
+name = "billow-init"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
