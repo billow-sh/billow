@@ -1,0 +1,13 @@
+[containerd]
+version = "2.3.1"
+
+[containerd.sha256]
+arm64 = "2511a7f204fe04912acf95d6c59a65180be4491343fec79ce23b9166ac18aff3"
+amd64 = "3e7da6f4eaab072e11fc2e88f5a2eaf6da6ffff2c6c2a8f262d3856df8e2be35"
+
+[crun]
+version = "1.28"
+
+[crun.sha256]
+arm64 = "cc1e8ec89aef1422e0741be196f9ed099e2e09d2f48f30f27cd44a22ef1f0342"
+amd64 = "2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42"

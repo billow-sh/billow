@@ -1,3 +1,4 @@
+mod containerd;
 mod install;
 mod paths;
 mod system;
@@ -10,9 +11,10 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => {
             println!(
-                "{} installed and started as {}",
+                "{} installed and started as {} with {}",
                 paths::AGENT_BINARY_NAME,
-                paths::SERVICE_NAME
+                paths::AGENT_SERVICE_NAME,
+                paths::CONTAINERD_SERVICE_NAME
             );
             ExitCode::SUCCESS
         }
@@ -26,14 +28,16 @@ fn main() -> ExitCode {
 fn run() -> io::Result<()> {
     system::ensure_root()?;
     systemd::ensure_available()?;
-    install::ensure_agent_not_installed()?;
-    systemd::ensure_service_not_installed()?;
+    install::ensure_binaries_not_installed(paths::INSTALL_BINARY_NAMES)?;
+    containerd::ensure_config_not_installed()?;
+    systemd::ensure_units_not_installed()?;
 
-    let agent_source = install::find_agent_source()?;
-    install::install_agent_binary(&agent_source)?;
-    systemd::install_unit()?;
+    let binary_sources = install::find_binary_sources(paths::INSTALL_BINARY_NAMES)?;
+    install::install_binaries(&binary_sources)?;
+    containerd::install_config()?;
+    systemd::install_units()?;
     systemd::reload()?;
-    systemd::enable_and_start_service()?;
+    systemd::enable_and_start_services()?;
 
     Ok(())
 }

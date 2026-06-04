@@ -4,60 +4,102 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn ensure_agent_not_installed() -> io::Result<()> {
-    let agent_install_path = paths::agent_install_path();
+pub(crate) struct BinarySource {
+    name: &'static str,
+    path: PathBuf,
+}
 
-    if agent_install_path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{} already exists", paths::display(&agent_install_path)),
-        ));
+pub(crate) fn ensure_binaries_not_installed(binary_names: &[&str]) -> io::Result<()> {
+    for binary_name in binary_names {
+        let install_path = paths::binary_install_path(binary_name);
+
+        if install_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} already exists", paths::display(&install_path)),
+            ));
+        }
     }
 
     Ok(())
 }
 
-pub(crate) fn find_agent_source() -> io::Result<PathBuf> {
-    for candidate in paths::agent_source_candidates()? {
-        if candidate.is_file() {
-            return Ok(candidate);
+pub(crate) fn find_binary_sources(
+    binary_names: &'static [&'static str],
+) -> io::Result<Vec<BinarySource>> {
+    let mut sources = Vec::with_capacity(binary_names.len());
+
+    for binary_name in binary_names {
+        let mut found = None;
+
+        for candidate in paths::binary_source_candidates(binary_name)? {
+            if candidate.is_file() {
+                found = Some(candidate);
+                break;
+            }
         }
+
+        let Some(path) = found else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{binary_name} must be present next to billow-init or in the current directory"
+                ),
+            ));
+        };
+
+        sources.push(BinarySource {
+            name: binary_name,
+            path,
+        });
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "{} must be present next to billow-init or in the current directory",
-            paths::AGENT_BINARY_NAME
-        ),
-    ))
+    Ok(sources)
 }
 
-pub(crate) fn install_agent_binary(agent_source: &Path) -> io::Result<()> {
-    let agent_install_path = paths::agent_install_path();
+pub(crate) fn install_binaries(binary_sources: &[BinarySource]) -> io::Result<()> {
+    let bin_dir = paths::bin_dir();
 
-    move_file(agent_source, &agent_install_path).map_err(|error| {
+    fs::create_dir_all(&bin_dir).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
-                "failed to move {} to {}: {error}",
-                agent_source.display(),
-                paths::display(&agent_install_path)
+                "failed to create binary directory {}: {error}",
+                paths::display(&bin_dir)
             ),
         )
     })?;
 
-    fs::set_permissions(&agent_install_path, fs::Permissions::from_mode(0o755)).map_err(
-        |error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "failed to set permissions on {}: {error}",
-                    paths::display(&agent_install_path)
-                ),
-            )
-        },
-    )?;
+    for binary_source in binary_sources {
+        install_binary(binary_source)?;
+    }
+
+    Ok(())
+}
+
+fn install_binary(binary_source: &BinarySource) -> io::Result<()> {
+    let install_path = paths::binary_install_path(binary_source.name);
+
+    move_file(&binary_source.path, &install_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to move {} to {}: {error}",
+                binary_source.path.display(),
+                paths::display(&install_path)
+            ),
+        )
+    })?;
+
+    fs::set_permissions(&install_path, fs::Permissions::from_mode(0o755)).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to set permissions on {}: {error}",
+                paths::display(&install_path)
+            ),
+        )
+    })?;
 
     Ok(())
 }

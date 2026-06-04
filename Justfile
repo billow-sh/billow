@@ -1,23 +1,67 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 root := justfile_directory()
+containerd_version := `dasel query -i toml -o json 'containerd.version' < vendor.toml | tr -d '"'`
+crun_version := `dasel query -i toml -o json 'crun.version' < vendor.toml | tr -d '"'`
 linux_musl_target := `case "$(uname -m)" in arm64|aarch64) echo aarch64-unknown-linux-musl ;; x86_64|amd64) echo x86_64-unknown-linux-musl ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac`
+linux_arch := `case "$(uname -m)" in arm64|aarch64) echo arm64 ;; x86_64|amd64) echo amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac`
+containerd_sha256 := `case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac; dasel query -i toml -o json "containerd.sha256.${arch}" < vendor.toml | tr -d '"'`
+crun_sha256 := `case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac; dasel query -i toml -o json "crun.sha256.${arch}" < vendor.toml | tr -d '"'`
 archive := "billow-" + linux_musl_target + ".tar.gz"
 stable_archive := "billow.tar.gz"
 stage_dir := root + "/target/billow-assemble/" + linux_musl_target
+vendor_dir := root + "/.cache/vendor/linux-" + linux_arch + "/containerd-static-" + containerd_version + "-crun-" + crun_version
+vendor_download_dir := vendor_dir + "/downloads"
+vendor_extract_dir := vendor_dir + "/extract"
+vendor_bin_dir := vendor_dir + "/bin"
+containerd_archive := "containerd-static-" + containerd_version + "-linux-" + linux_arch + ".tar.gz"
+containerd_archive_path := vendor_download_dir + "/" + containerd_archive
+containerd_url := "https://github.com/containerd/containerd/releases/download/v" + containerd_version + "/" + containerd_archive
+crun_download := "crun-" + crun_version + "-linux-" + linux_arch
+crun_download_path := vendor_download_dir + "/" + crun_download
+crun_url := "https://github.com/containers/crun/releases/download/" + crun_version + "/" + crun_download
 
 default:
     @just --list
 
-assemble: _build-linux-musl
+assemble: _build-linux-musl vendor
     mkdir -p "{{stage_dir}}"
     install -m 0755 "{{root}}/target/{{linux_musl_target}}/release/billow-agent" "{{stage_dir}}/billow-agent"
     install -m 0755 "{{root}}/target/{{linux_musl_target}}/release/billow-init" "{{stage_dir}}/billow-init"
-    COPYFILE_DISABLE=1 tar --no-xattrs -C "{{stage_dir}}" -czf "{{root}}/target/{{archive}}" billow-agent billow-init
+    install -m 0755 "{{vendor_bin_dir}}/containerd" "{{stage_dir}}/containerd"
+    install -m 0755 "{{vendor_bin_dir}}/containerd-shim-runc-v2" "{{stage_dir}}/containerd-shim-runc-v2"
+    install -m 0755 "{{vendor_bin_dir}}/crun" "{{stage_dir}}/crun"
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "{{stage_dir}}" -czf "{{root}}/target/{{archive}}" billow-agent billow-init containerd containerd-shim-runc-v2 crun
     cp "{{root}}/target/{{archive}}" "{{root}}/target/{{stable_archive}}"
     install -m 0755 "{{root}}/install.sh" "{{root}}/target/install.sh"
+    @printf '%s\n' "WARNING: Billow tarballs are for development and internal testing only. Do not redistribute until third-party license and notice distribution is implemented." >&2
     @echo "{{root}}/target/{{archive}}"
     @echo "{{root}}/target/{{stable_archive}}"
+
+vendor:
+    mkdir -p "{{vendor_download_dir}}" "{{vendor_extract_dir}}" "{{vendor_bin_dir}}"
+    if [[ ! -f "{{containerd_archive_path}}" ]]; then \
+        curl -fL --retry 3 -o "{{containerd_archive_path}}.tmp" "{{containerd_url}}"; \
+        printf '%s  %s\n' "{{containerd_sha256}}" "{{containerd_archive_path}}.tmp" | shasum -a 256 -c -; \
+        mv "{{containerd_archive_path}}.tmp" "{{containerd_archive_path}}"; \
+    fi
+    printf '%s  %s\n' "{{containerd_sha256}}" "{{containerd_archive_path}}" | shasum -a 256 -c -
+    if [[ ! -x "{{vendor_bin_dir}}/containerd" || ! -x "{{vendor_bin_dir}}/containerd-shim-runc-v2" ]]; then \
+        rm -rf "{{vendor_extract_dir}}/containerd"; \
+        mkdir -p "{{vendor_extract_dir}}/containerd"; \
+        tar -xzf "{{containerd_archive_path}}" -C "{{vendor_extract_dir}}/containerd"; \
+        install -m 0755 "{{vendor_extract_dir}}/containerd/bin/containerd" "{{vendor_bin_dir}}/containerd"; \
+        install -m 0755 "{{vendor_extract_dir}}/containerd/bin/containerd-shim-runc-v2" "{{vendor_bin_dir}}/containerd-shim-runc-v2"; \
+    fi
+    if [[ ! -f "{{crun_download_path}}" ]]; then \
+        curl -fL --retry 3 -o "{{crun_download_path}}.tmp" "{{crun_url}}"; \
+        printf '%s  %s\n' "{{crun_sha256}}" "{{crun_download_path}}.tmp" | shasum -a 256 -c -; \
+        mv "{{crun_download_path}}.tmp" "{{crun_download_path}}"; \
+    fi
+    printf '%s  %s\n' "{{crun_sha256}}" "{{crun_download_path}}" | shasum -a 256 -c -
+    if [[ ! -x "{{vendor_bin_dir}}/crun" ]]; then \
+        install -m 0755 "{{crun_download_path}}" "{{vendor_bin_dir}}/crun"; \
+    fi
 
 _build-linux-musl:
     case "$(uname -s)" in \
