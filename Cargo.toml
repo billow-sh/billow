@@ -1,5 +1,5 @@
 [workspace]
-members = ["agent", "api", "cli", "init"]
+members = ["agent", "api", "cli", "init", "vm-pool"]
 resolver = "3"
 
 [workspace.package]

@@ -20,6 +20,11 @@ containerd_url := "https://github.com/containerd/containerd/releases/download/v"
 crun_download := "crun-" + crun_version + "-linux-" + linux_arch
 crun_download_path := vendor_download_dir + "/" + crun_download
 crun_url := "https://github.com/containers/crun/releases/download/" + crun_version + "/" + crun_download
+vm_pool_dir := root + "/target/vm-pool"
+vm_pool_socket := vm_pool_dir + "/vm-pool.sock"
+vm_pool_pid := vm_pool_dir + "/vm-pool.pid"
+vm_pool_log := vm_pool_dir + "/vm-pool.log"
+vm_pool_bin := root + "/target/debug/vm-pool"
 
 default:
     @just --list
@@ -75,6 +80,39 @@ serve port="8000" bind="0.0.0.0": assemble
     @echo "Installer: http://{{bind}}:{{port}}/install.sh"
     python3 -m http.server {{port}} --bind {{bind}} --directory "{{root}}/target"
 
+vm-pool-start:
+    mkdir -p "{{vm_pool_dir}}"
+    cargo build -p vm-pool
+    if BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" ping >/dev/null 2>&1; then \
+        echo "vm-pool already running (socket: {{vm_pool_socket}})"; \
+        exit 0; \
+    fi
+    rm -f "{{vm_pool_socket}}"
+    BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" start "{{vm_pool_log}}" "{{vm_pool_pid}}"
+    ready=0; \
+    for _ in {1..50}; do \
+        if BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" ping >/dev/null 2>&1; then ready=1; break; fi; \
+        sleep 0.1; \
+    done; \
+    if [[ "$ready" != 1 ]]; then echo "vm-pool did not become ready; see {{vm_pool_log}}" >&2; exit 1; fi; \
+    echo "vm-pool started (socket: {{vm_pool_socket}}, log: {{vm_pool_log}})"
+
+vm-pool-wait-ready timeout="600":
+    BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" wait-ready "{{timeout}}"
+
+vm-pool-status:
+    BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" status
+
+vm-pool-stop:
+    stop_status=0; \
+    if [[ -x "{{vm_pool_bin}}" ]] && BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" ping >/dev/null 2>&1; then \
+        BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" "{{vm_pool_bin}}" stop || stop_status="$?"; \
+    else \
+        echo "vm-pool is not running"; \
+    fi; \
+    rm -f "{{vm_pool_socket}}" "{{vm_pool_pid}}"; \
+    exit "$stop_status"
+
 vm-test port="8000": assemble
     server_log="{{root}}/target/vm-test-http.log"; \
     python3 -m http.server "{{port}}" --bind 0.0.0.0 --directory "{{root}}/target" > "$server_log" 2>&1 & \
@@ -87,4 +125,4 @@ vm-test port="8000": assemble
         sleep 0.25; \
     done; \
     if [[ "$ready" != 1 ]]; then echo "HTTP server did not become ready; see $server_log" >&2; exit 1; fi; \
-    BILLOW_TEST_PORT="{{port}}" BILLOW_ARCHIVE="{{stable_archive}}" BILLOW_INSTALL_SCRIPT="install.sh" "{{root}}/vm-test.sh"
+    BILLOW_VM_POOL_SOCKET="{{vm_pool_socket}}" BILLOW_VM_POOL_BIN="{{vm_pool_bin}}" BILLOW_TEST_PORT="{{port}}" BILLOW_ARCHIVE="{{stable_archive}}" BILLOW_INSTALL_SCRIPT="install.sh" "{{root}}/vm-test.sh"

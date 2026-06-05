@@ -6,13 +6,20 @@ archive="${BILLOW_ARCHIVE:-billow.tar.gz}"
 install_script="${BILLOW_INSTALL_SCRIPT:-install.sh}"
 vm_name="${BILLOW_VM_NAME:-billow-test-$(date +%s)-$$}"
 message="${BILLOW_TEST_MESSAGE:-it works}"
+vm_pool_bin="${BILLOW_VM_POOL_BIN:-vm-pool}"
 vm_created=0
+vm_pool_taken=0
 
 cleanup() {
     status=$?
     set +e
 
-    if [[ "$vm_created" == 1 ]]; then
+    if [[ "$vm_pool_taken" == 1 ]]; then
+        if ! "$vm_pool_bin" drop "$vm_name" >/dev/null 2>&1; then
+            multipass stop "$vm_name" >/dev/null 2>&1
+            multipass delete --purge "$vm_name" >/dev/null 2>&1
+        fi
+    elif [[ "$vm_created" == 1 ]]; then
         multipass stop "$vm_name" >/dev/null 2>&1
         multipass delete --purge "$vm_name" >/dev/null 2>&1
     fi
@@ -75,9 +82,36 @@ extract_vm_ip() {
     multipass info "$vm_name" | awk '/IPv4/ {print $2; exit}'
 }
 
-echo "Launching Multipass VM: $vm_name" >&2
-multipass launch --name "$vm_name" --cpus 1 --memory 1G --disk 5G --timeout 600
-vm_created=1
+vm_pool_available() {
+    if [[ "${BILLOW_VM_POOL_DISABLED:-0}" == 1 ]]; then
+        return 1
+    fi
+
+    if [[ -n "${BILLOW_VM_POOL_BIN:-}" ]]; then
+        [[ -x "$vm_pool_bin" ]] || return 1
+    else
+        command -v "$vm_pool_bin" >/dev/null 2>&1 || return 1
+    fi
+
+    "$vm_pool_bin" ping >/dev/null 2>&1
+}
+
+if vm_pool_available; then
+    echo "Taking Multipass VM from vm-pool" >&2
+    if vm_name="$("$vm_pool_bin" take)"; then
+        vm_created=1
+        vm_pool_taken=1
+        echo "Using pooled Multipass VM: $vm_name" >&2
+    else
+        echo "vm-pool take failed; launching Multipass VM directly" >&2
+    fi
+fi
+
+if [[ "$vm_created" != 1 ]]; then
+    echo "Launching Multipass VM: $vm_name" >&2
+    multipass launch --name "$vm_name" --cpus 1 --memory 1G --disk 5G --timeout 600
+    vm_created=1
+fi
 
 wait_for_vm_exec
 host_ip="$(detect_host_ip)"

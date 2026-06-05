@@ -1,0 +1,7 @@
+[package]
+name = "vm-pool"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc = "0.2.186"
