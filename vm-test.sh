@@ -100,12 +100,30 @@ for _ in {1..30}; do
     if actual="$(BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- echo "$message" 2>/dev/null)"; then
         if [[ "$actual" == "$message" ]]; then
             printf '%s\n' "$actual"
-            exit 0
+            break
         fi
     fi
 
     sleep 1
 done
 
-echo "expected '$message', got '${actual:-<no response>}'" >&2
+if [[ "$actual" != "$message" ]]; then
+    echo "expected '$message', got '${actual:-<no response>}'" >&2
+    exit 1
+fi
+
+echo "Testing billow-cli run hello-world" >&2
+run_actual=""
+for _ in {1..120}; do
+    if run_actual="$(BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- run hello-world 2>&1)"; then
+        if [[ "$run_actual" == *"Hello from Docker!"* ]]; then
+            printf '%s\n' "$run_actual"
+            exit 0
+        fi
+    fi
+
+    sleep 2
+done
+
+echo "expected hello-world output, got '${run_actual:-<no response>}'" >&2
 exit 1

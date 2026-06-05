@@ -21,10 +21,15 @@ pub(crate) const BIN_DIR_ENV: &str = "BILLOW_BIN_DIR";
 pub(crate) const CONFIG_DIR_ENV: &str = "BILLOW_CONFIG_DIR";
 pub(crate) const SYSTEMD_UNIT_DIR_ENV: &str = "BILLOW_SYSTEMD_UNIT_DIR";
 pub(crate) const SYSTEMD_RUNTIME_DIR_ENV: &str = "BILLOW_SYSTEMD_RUNTIME_DIR";
+pub(crate) const AGENT_CONTAINERD_SOCKET_ENV: &str = "BILLOW_CONTAINERD_SOCKET";
+pub(crate) const AGENT_CONTAINERD_SHIM_ENV: &str = "BILLOW_CONTAINERD_SHIM";
+pub(crate) const AGENT_CRUN_ENV: &str = "BILLOW_CRUN";
+pub(crate) const AGENT_TASK_DIR_ENV: &str = "BILLOW_TASK_DIR";
 
 pub(crate) const CONTAINERD_ROOT_DIR: &str = "/var/lib/billow/containerd";
 pub(crate) const CONTAINERD_STATE_DIR: &str = "/run/billow/containerd";
 pub(crate) const CONTAINERD_ADDRESS: &str = "/run/billow/containerd/containerd.sock";
+pub(crate) const TASK_DIR: &str = "/run/billow/tasks";
 
 const DEFAULT_BIN_DIR: &str = "/usr/local/lib/billow/bin";
 const DEFAULT_CONFIG_DIR: &str = "/etc/billow";

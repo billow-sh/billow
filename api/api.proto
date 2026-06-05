@@ -2,14 +2,12 @@ syntax = "proto3";
 
 package billow.api.v1;
 
-import "google/protobuf/empty.proto";
-
 service EchoService {
   rpc Echo(EchoRequest) returns (EchoResponse);
 }
 
 service TaskService {
-  rpc Run(RunRequest) returns (google.protobuf.Empty);
+  rpc Run(RunRequest) returns (RunResponse);
 }
 
 message EchoRequest {
@@ -22,4 +20,13 @@ message EchoResponse {
 
 message RunRequest {
   string image = 1;
+}
+
+message RunResponse {
+  string task_id = 1;
+  uint32 exit_code = 2;
+  bytes stdout = 3;
+  bytes stderr = 4;
+  bool stdout_truncated = 5;
+  bool stderr_truncated = 6;
 }

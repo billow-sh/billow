@@ -179,6 +179,20 @@ fn happy_path_installs_agent_unit_and_starts_service() {
         "ExecStart={}",
         fixture.agent_install_path().display()
     )));
+    assert!(
+        unit.contains(
+            "Environment=BILLOW_CONTAINERD_SOCKET=/run/billow/containerd/containerd.sock"
+        )
+    );
+    assert!(unit.contains(&format!(
+        "Environment=BILLOW_CONTAINERD_SHIM={}",
+        fixture.install_path("containerd-shim-runc-v2").display()
+    )));
+    assert!(unit.contains(&format!(
+        "Environment=BILLOW_CRUN={}",
+        fixture.install_path("crun").display()
+    )));
+    assert!(unit.contains("Environment=BILLOW_TASK_DIR=/run/billow/tasks"));
     assert!(unit.contains("Restart=on-failure"));
     assert_mode(fixture.service_path(), 0o644);
 

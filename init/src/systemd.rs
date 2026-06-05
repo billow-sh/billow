@@ -114,6 +114,8 @@ pub(crate) fn enable_and_start_services() -> io::Result<()> {
 
 fn agent_service_unit() -> String {
     let agent_install_path = paths::agent_install_path();
+    let containerd_shim_path = paths::containerd_shim_install_path();
+    let crun_path = paths::crun_install_path();
 
     format!(
         "\
@@ -124,6 +126,10 @@ After=network.target {}
 
 [Service]
 Type=simple
+Environment={}={}
+Environment={}={}
+Environment={}={}
+Environment={}={}
 ExecStart={}
 Restart=on-failure
 RestartSec=5s
@@ -133,6 +139,14 @@ WantedBy=multi-user.target
 ",
         paths::CONTAINERD_SERVICE_NAME,
         paths::CONTAINERD_SERVICE_NAME,
+        paths::AGENT_CONTAINERD_SOCKET_ENV,
+        paths::CONTAINERD_ADDRESS,
+        paths::AGENT_CONTAINERD_SHIM_ENV,
+        paths::display(&containerd_shim_path),
+        paths::AGENT_CRUN_ENV,
+        paths::display(&crun_path),
+        paths::AGENT_TASK_DIR_ENV,
+        paths::TASK_DIR,
         paths::display(&agent_install_path)
     )
 }
@@ -180,6 +194,12 @@ mod tests {
         assert!(unit.contains("Description=Billow Agent"));
         assert!(unit.contains("Requires=billow-containerd.service"));
         assert!(unit.contains("After=network.target billow-containerd.service"));
+        assert!(unit.contains(
+            "Environment=BILLOW_CONTAINERD_SOCKET=/run/billow/containerd/containerd.sock"
+        ));
+        assert!(unit.contains("Environment=BILLOW_CONTAINERD_SHIM="));
+        assert!(unit.contains("Environment=BILLOW_CRUN="));
+        assert!(unit.contains("Environment=BILLOW_TASK_DIR=/run/billow/tasks"));
         assert!(unit.contains("ExecStart="));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=multi-user.target"));
