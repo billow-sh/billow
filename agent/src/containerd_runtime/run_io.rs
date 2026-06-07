@@ -13,6 +13,16 @@ pub(super) struct StdioPaths {
     pub(super) stderr: PathBuf,
 }
 
+impl StdioPaths {
+    pub(super) fn for_run_dir(run_dir: &Path) -> Self {
+        StdioPaths {
+            stdin: run_dir.join("stdin"),
+            stdout: run_dir.join("stdout"),
+            stderr: run_dir.join("stderr"),
+        }
+    }
+}
+
 pub(super) fn create_task_dir(path: &Path) -> RuntimeResult<()> {
     DirBuilder::new()
         .recursive(true)
@@ -40,11 +50,7 @@ pub(super) fn create_task_dir(path: &Path) -> RuntimeResult<()> {
 }
 
 pub(super) fn create_stdio_files(run_dir: &Path) -> RuntimeResult<StdioPaths> {
-    let stdio = StdioPaths {
-        stdin: run_dir.join("stdin"),
-        stdout: run_dir.join("stdout"),
-        stderr: run_dir.join("stderr"),
-    };
+    let stdio = StdioPaths::for_run_dir(run_dir);
 
     create_file(&stdio.stdin)?;
     create_file(&stdio.stdout)?;

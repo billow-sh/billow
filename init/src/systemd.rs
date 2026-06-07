@@ -130,6 +130,7 @@ Environment={}={}
 Environment={}={}
 Environment={}={}
 Environment={}={}
+Environment={}={}
 ExecStart={}
 Restart=on-failure
 RestartSec=5s
@@ -147,6 +148,8 @@ WantedBy=multi-user.target
         paths::display(&crun_path),
         paths::AGENT_TASK_DIR_ENV,
         paths::TASK_DIR,
+        paths::AGENT_WORKLOAD_DB_PATH_ENV,
+        paths::WORKLOAD_DB_PATH,
         paths::display(&agent_install_path)
     )
 }
@@ -200,6 +203,9 @@ mod tests {
         assert!(unit.contains("Environment=BILLOW_CONTAINERD_SHIM="));
         assert!(unit.contains("Environment=BILLOW_CRUN="));
         assert!(unit.contains("Environment=BILLOW_TASK_DIR=/run/billow/tasks"));
+        assert!(
+            unit.contains("Environment=BILLOW_WORKLOAD_DB_PATH=/var/lib/billow/workloads.sqlite3")
+        );
         assert!(unit.contains("ExecStart="));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=multi-user.target"));

@@ -193,6 +193,7 @@ fn happy_path_installs_agent_unit_and_starts_service() {
         fixture.install_path("crun").display()
     )));
     assert!(unit.contains("Environment=BILLOW_TASK_DIR=/run/billow/tasks"));
+    assert!(unit.contains("Environment=BILLOW_WORKLOAD_DB_PATH=/var/lib/billow/workloads.sqlite3"));
     assert!(unit.contains("Restart=on-failure"));
     assert_mode(fixture.service_path(), 0o644);
 

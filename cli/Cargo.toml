@@ -5,5 +5,5 @@ edition.workspace = true
 
 [dependencies]
 billow-api.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tonic.workspace = true

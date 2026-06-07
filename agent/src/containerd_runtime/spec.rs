@@ -1,9 +1,10 @@
 use super::run_io::path_string;
 use super::{OCI_SPEC_TYPE_URL, RUNC_OPTIONS_TYPE_URL, RuntimeResult};
 use oci_spec::image::Config;
-use oci_spec::runtime::{Process, Root, Spec};
+use oci_spec::runtime::{Capabilities, Capability, LinuxCapabilities, Process, Root, Spec};
 use prost::Message;
 use prost_types::Any;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub(super) fn runtime_spec(
@@ -15,6 +16,7 @@ pub(super) fn runtime_spec(
     process.set_args(Some(args));
     process.set_env(Some(image_env(config)));
     process.set_cwd(image_cwd(config).into());
+    process.set_capabilities(Some(default_capabilities()));
 
     let mut root = Root::default();
     root.set_path(PathBuf::from("rootfs"));
@@ -64,6 +66,33 @@ fn image_cwd(config: Option<&Config>) -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
+fn default_capabilities() -> LinuxCapabilities {
+    let capabilities: Capabilities = HashSet::from([
+        Capability::AuditWrite,
+        Capability::Chown,
+        Capability::DacOverride,
+        Capability::Fowner,
+        Capability::Fsetid,
+        Capability::Kill,
+        Capability::Mknod,
+        Capability::NetBindService,
+        Capability::NetRaw,
+        Capability::Setfcap,
+        Capability::Setgid,
+        Capability::Setpcap,
+        Capability::Setuid,
+        Capability::SysChroot,
+    ]);
+
+    let mut linux_capabilities = LinuxCapabilities::default();
+    linux_capabilities.set_bounding(Some(capabilities.clone()));
+    linux_capabilities.set_effective(Some(capabilities.clone()));
+    linux_capabilities.set_inheritable(Some(capabilities.clone()));
+    linux_capabilities.set_permitted(Some(capabilities.clone()));
+    linux_capabilities.set_ambient(Some(HashSet::new()));
+    linux_capabilities
+}
+
 #[derive(Clone, PartialEq, Message)]
 struct RuncOptions {
     #[prost(bool, tag = "1")]
@@ -90,4 +119,21 @@ struct RuncOptions {
     task_api_address: String,
     #[prost(uint32, tag = "13")]
     task_api_version: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_capabilities_do_not_use_ambient_set() {
+        let capabilities = default_capabilities();
+
+        assert!(
+            capabilities
+                .ambient()
+                .as_ref()
+                .is_some_and(|ambient| ambient.is_empty())
+        );
+    }
 }

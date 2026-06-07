@@ -128,10 +128,14 @@ if [[ -z "$vm_ip" ]]; then
     exit 1
 fi
 
+run_cli() {
+    BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- "$@"
+}
+
 echo "Testing billow-agent at $vm_ip" >&2
 actual=""
 for _ in {1..30}; do
-    if actual="$(BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- echo "$message" 2>/dev/null)"; then
+    if actual="$(run_cli echo "$message" 2>/dev/null)"; then
         if [[ "$actual" == "$message" ]]; then
             printf '%s\n' "$actual"
             break
@@ -146,18 +150,116 @@ if [[ "$actual" != "$message" ]]; then
     exit 1
 fi
 
-echo "Testing billow-cli run hello-world" >&2
-run_actual=""
+echo "Testing once workload hello-world" >&2
+hello_id="$(run_cli workload submit once hello-world)"
+hello_status=""
 for _ in {1..120}; do
-    if run_actual="$(BILLOW_AGENT_IP="$vm_ip" cargo run --quiet -p billow-cli -- run hello-world 2>&1)"; then
-        if [[ "$run_actual" == *"Hello from Docker!"* ]]; then
-            printf '%s\n' "$run_actual"
-            exit 0
+    if hello_status="$(run_cli workload get "$hello_id" 2>&1)"; then
+        if [[ "$hello_status" == *"actual_state=stopped"* || "$hello_status" == *"actual_state=failed"* ]]; then
+            break
         fi
     fi
 
     sleep 2
 done
 
-echo "expected hello-world output, got '${run_actual:-<no response>}'" >&2
-exit 1
+if [[ "$hello_status" != *"actual_state=stopped"* ]]; then
+    echo "expected hello-world workload to stop, got '${hello_status:-<no response>}'" >&2
+    exit 1
+fi
+
+hello_logs=""
+if ! hello_logs="$(run_cli workload logs "$hello_id" 2>&1)"; then
+    echo "hello-world workload logs failed: ${hello_logs:-<no response>}" >&2
+    exit 1
+fi
+if [[ "$hello_logs" != *"Hello from Docker!"* ]]; then
+    echo "expected hello-world output, got '${hello_logs:-<no response>}'" >&2
+    exit 1
+fi
+printf '%s\n' "$hello_logs"
+
+echo "Testing service workload nginx" >&2
+nginx_id="$(run_cli workload submit service nginx)"
+nginx_status=""
+for _ in {1..120}; do
+    if nginx_status="$(run_cli workload get "$nginx_id" 2>&1)"; then
+        if [[ "$nginx_status" == *"actual_state=running"* ]]; then
+            break
+        fi
+    fi
+
+    sleep 2
+done
+
+if [[ "$nginx_status" != *"actual_state=running"* ]]; then
+    echo "expected nginx workload to reach running, got '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+
+nginx_logs=""
+for _ in {1..60}; do
+    if nginx_logs="$(run_cli workload logs "$nginx_id" 2>&1)"; then
+        if [[ "$nginx_logs" == *"start worker process"* ]]; then
+            break
+        fi
+    fi
+
+    sleep 2
+done
+
+if [[ "$nginx_logs" != *"start worker process"* ]]; then
+    echo "expected nginx logs to contain 'start worker process', got '${nginx_logs:-<no response>}'" >&2
+    exit 1
+fi
+
+if ! nginx_status="$(run_cli workload get "$nginx_id" 2>&1)"; then
+    echo "nginx workload status failed: ${nginx_status:-<no response>}" >&2
+    exit 1
+fi
+if [[ "$nginx_status" != *"actual_state=running"* ]]; then
+    echo "expected nginx workload to still be running, got '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+
+if ! stop_output="$(run_cli workload stop "$nginx_id" 2>&1)"; then
+    echo "nginx workload stop failed: ${stop_output:-<no response>}" >&2
+    exit 1
+fi
+
+for _ in {1..60}; do
+    if nginx_status="$(run_cli workload get "$nginx_id" 2>&1)"; then
+        if [[ "$nginx_status" == *"actual_state=stopped"* ]]; then
+            break
+        fi
+    fi
+
+    sleep 2
+done
+
+if [[ "$nginx_status" != *"actual_state=stopped"* ]]; then
+    echo "expected nginx workload to stop, got '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+
+if ! delete_output="$(run_cli workload delete "$nginx_id" 2>&1)"; then
+    echo "nginx workload delete failed: ${delete_output:-<no response>}" >&2
+    exit 1
+fi
+
+for _ in {1..60}; do
+    if nginx_status="$(run_cli workload get "$nginx_id" 2>&1)"; then
+        if [[ "$nginx_status" == *"actual_state=deleted"* ]]; then
+            break
+        fi
+    fi
+
+    sleep 2
+done
+
+if [[ "$nginx_status" != *"actual_state=deleted"* ]]; then
+    echo "expected nginx workload to be deleted, got '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+
+printf '%s\n' "$nginx_status"

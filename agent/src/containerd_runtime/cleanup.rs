@@ -28,6 +28,17 @@ impl RunCleanup {
         }
     }
 
+    pub(super) fn existing(task_id: String, snapshot_key: String, run_dir: PathBuf) -> Self {
+        Self {
+            task_id,
+            snapshot_key,
+            run_dir,
+            task_created: true,
+            container_created: true,
+            snapshot_created: true,
+        }
+    }
+
     pub(super) fn mark_task_created(&mut self) {
         self.task_created = true;
     }
@@ -40,7 +51,7 @@ impl RunCleanup {
         self.snapshot_created = true;
     }
 
-    pub(super) async fn cleanup(self, client: &Client) -> RuntimeResult<()> {
+    pub(super) async fn cleanup(self, client: &Client, remove_run_dir: bool) -> RuntimeResult<()> {
         let mut errors = Vec::new();
 
         if self.task_created {
@@ -98,12 +109,14 @@ impl RunCleanup {
             }
         }
 
-        if let Err(error) = fs::remove_dir_all(&self.run_dir) {
-            if error.kind() != io::ErrorKind::NotFound {
-                errors.push(format!(
-                    "remove task directory {} failed: {error}",
-                    self.run_dir.display()
-                ));
+        if remove_run_dir {
+            if let Err(error) = fs::remove_dir_all(&self.run_dir) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    errors.push(format!(
+                        "remove task directory {} failed: {error}",
+                        self.run_dir.display()
+                    ));
+                }
             }
         }
 
