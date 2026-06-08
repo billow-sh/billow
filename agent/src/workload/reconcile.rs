@@ -7,13 +7,11 @@ use super::types::{
 };
 use uuid::Uuid;
 
-const MAX_CLEANUP_ATTEMPTS: i64 = 3;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CleanupOutcome {
+    Blocked,
+    Released,
     Done,
-    Pending,
-    Failed,
 }
 
 pub(crate) async fn run_once(manager: &WorkloadManager) -> WorkloadResult<()> {
@@ -68,7 +66,7 @@ async fn reconcile_desired_running(
             if !restart_backoff_ready(manager, workload)? {
                 return Ok(());
             }
-            if cleanup == CleanupOutcome::Done {
+            if cleanup != CleanupOutcome::Blocked {
                 start_workload(manager, workload).await?;
             }
             Ok(())
@@ -118,7 +116,7 @@ async fn reconcile_desired_deleted(
 ) -> WorkloadResult<()> {
     match workload.actual_state {
         ActualState::Accepted => {
-            if cleanup_latest_run(manager, workload).await? != CleanupOutcome::Pending {
+            if cleanup_latest_run(manager, workload).await? == CleanupOutcome::Done {
                 manager.storage.compare_and_set_actual(
                     &workload.id,
                     ActualState::Accepted,
@@ -133,7 +131,7 @@ async fn reconcile_desired_deleted(
             enter_stopping(manager, workload).await
         }
         ActualState::Stopped | ActualState::Failed => {
-            if cleanup_latest_run(manager, workload).await? != CleanupOutcome::Pending {
+            if cleanup_latest_run(manager, workload).await? == CleanupOutcome::Done {
                 manager.storage.compare_and_set_actual(
                     &workload.id,
                     workload.actual_state,
@@ -168,7 +166,10 @@ async fn start_workload(manager: &WorkloadManager, workload: &Workload) -> Workl
         .await;
 
     match start_result {
-        Ok(_) => {
+        Ok(result) => {
+            manager
+                .storage
+                .set_run_container_ip(&runtime_task_id, result.container_ip.as_deref())?;
             manager.storage.compare_and_set_actual(
                 &workload.id,
                 ActualState::Creating,
@@ -180,7 +181,7 @@ async fn start_workload(manager: &WorkloadManager, workload: &Workload) -> Workl
         Err(error) => {
             if let Some(run) = manager.storage.latest_run(&workload.id)? {
                 if let Err(cleanup_error) =
-                    cleanup_runtime_run(manager, &run, RuntimeCleanupMode::PreserveLogs).await
+                    release_and_prune(manager, &run, RuntimeCleanupMode::PreserveLogs).await
                 {
                     eprintln!(
                         "billow-agent: cleanup after failed start for {} failed: {cleanup_error}",
@@ -224,10 +225,14 @@ async fn recover_creating(manager: &WorkloadManager, workload: &Workload) -> Wor
     };
 
     let adopt = matches!(
-        status,
+        status.as_ref(),
         Some(status) if matches!(status.state, RuntimeTaskState::Running | RuntimeTaskState::Stopped)
     );
     if adopt {
+        let container_ip = manager.runtime.container_ip(&run.runtime_task_id).await?;
+        manager
+            .storage
+            .set_run_container_ip(&run.runtime_task_id, container_ip.as_deref())?;
         manager.storage.compare_and_set_actual(
             &workload.id,
             ActualState::Creating,
@@ -238,7 +243,7 @@ async fn recover_creating(manager: &WorkloadManager, workload: &Workload) -> Wor
         return Ok(());
     }
 
-    match cleanup_runtime_run(manager, &run, RuntimeCleanupMode::RemoveLogs).await? {
+    match release_and_prune(manager, &run, RuntimeCleanupMode::RemoveLogs).await? {
         CleanupOutcome::Done => {
             manager.storage.delete_run(&run.runtime_task_id)?;
             manager.storage.compare_and_set_actual(
@@ -249,7 +254,16 @@ async fn recover_creating(manager: &WorkloadManager, workload: &Workload) -> Wor
                 None,
             )?;
         }
-        CleanupOutcome::Pending | CleanupOutcome::Failed => {}
+        CleanupOutcome::Released => {
+            manager.storage.compare_and_set_actual(
+                &workload.id,
+                ActualState::Creating,
+                ActualState::Accepted,
+                None,
+                None,
+            )?;
+        }
+        CleanupOutcome::Blocked => {}
     }
     Ok(())
 }
@@ -340,20 +354,14 @@ async fn cleanup_latest_run(
         return Ok(CleanupOutcome::Done);
     };
 
-    match run.cleanup_state {
-        CleanupState::Done => return Ok(CleanupOutcome::Done),
-        CleanupState::Failed if !cleanup_retry_due(&run) => return Ok(CleanupOutcome::Failed),
-        _ => {}
-    }
-
-    cleanup_runtime_run(manager, &run, RuntimeCleanupMode::PreserveLogs).await
+    release_and_prune(manager, &run, RuntimeCleanupMode::PreserveLogs).await
 }
 
-fn cleanup_retry_due(run: &WorkloadRun) -> bool {
+fn retry_due(attempts: i64, updated_at_unix_secs: i64) -> bool {
     let backoff = CLEANUP_RETRY_BACKOFF_SECS
-        .saturating_mul(run.cleanup_attempts)
+        .saturating_mul(attempts)
         .min(CLEANUP_RETRY_BACKOFF_CAP_SECS);
-    now_unix_secs().saturating_sub(run.updated_at_unix_secs) >= backoff
+    now_unix_secs().saturating_sub(updated_at_unix_secs) >= backoff
 }
 
 fn restart_backoff_ready(manager: &WorkloadManager, workload: &Workload) -> WorkloadResult<bool> {
@@ -418,47 +426,74 @@ async fn send_stop_signal(manager: &WorkloadManager, workload: &Workload, mode: 
     }
 }
 
-async fn cleanup_runtime_run(
+async fn release_and_prune(
     manager: &WorkloadManager,
     run: &WorkloadRun,
     mode: RuntimeCleanupMode,
 ) -> WorkloadResult<CleanupOutcome> {
-    match manager.runtime.cleanup(&run.runtime_task_id, mode).await {
-        Ok(()) => {
-            manager
+    if !run.container_released {
+        if !retry_due(run.release_attempts, run.updated_at_unix_secs) {
+            return Ok(CleanupOutcome::Blocked);
+        }
+        match manager
+            .runtime
+            .release_container(&run.runtime_task_id)
+            .await
+        {
+            Ok(()) => manager
                 .storage
-                .mark_run_cleanup_done(&run.runtime_task_id)?;
+                .mark_container_released(&run.runtime_task_id)?,
+            Err(error) => {
+                let attempts = run.release_attempts.saturating_add(1);
+                manager.storage.record_release_failure(
+                    &run.runtime_task_id,
+                    attempts,
+                    &error.to_string(),
+                )?;
+                eprintln!(
+                    "billow-agent: container release for run {} failed on attempt {attempts}: {error}",
+                    run.runtime_task_id
+                );
+                return Ok(CleanupOutcome::Blocked);
+            }
+        }
+    }
+
+    let prune_done = run.cleanup_state == CleanupState::Done;
+    if prune_done && mode == RuntimeCleanupMode::PreserveLogs {
+        return Ok(CleanupOutcome::Done);
+    }
+    if !prune_done
+        && run.container_released
+        && !retry_due(run.cleanup_attempts, run.updated_at_unix_secs)
+    {
+        return Ok(CleanupOutcome::Released);
+    }
+
+    match manager.runtime.prune_run(&run.runtime_task_id, mode).await {
+        Ok(()) => {
+            manager.storage.mark_run_prune_done(&run.runtime_task_id)?;
             Ok(CleanupOutcome::Done)
         }
         Err(error) => {
             let attempts = run.cleanup_attempts.saturating_add(1);
-            let next_state = if attempts >= MAX_CLEANUP_ATTEMPTS {
-                CleanupState::Failed
-            } else {
-                CleanupState::Pending
-            };
-            manager.storage.record_run_cleanup_failure(
+            manager.storage.record_run_prune_failure(
                 &run.runtime_task_id,
-                next_state,
                 attempts,
                 &error.to_string(),
             )?;
             eprintln!(
-                "billow-agent: cleanup for run {} failed on attempt {}: {error}",
-                run.runtime_task_id, attempts
+                "billow-agent: resource prune for run {} failed on attempt {attempts}: {error}",
+                run.runtime_task_id
             );
-            if next_state == CleanupState::Failed {
-                Ok(CleanupOutcome::Failed)
-            } else {
-                Ok(CleanupOutcome::Pending)
-            }
+            Ok(CleanupOutcome::Released)
         }
     }
 }
 
 async fn prune_cleaned_runs(manager: &WorkloadManager) -> WorkloadResult<()> {
     for run in manager.storage.list_prunable_runs()? {
-        if cleanup_runtime_run(manager, &run, RuntimeCleanupMode::RemoveLogs).await?
+        if release_and_prune(manager, &run, RuntimeCleanupMode::RemoveLogs).await?
             == CleanupOutcome::Done
         {
             manager.storage.delete_run(&run.runtime_task_id)?;
@@ -492,6 +527,7 @@ mod tests {
             desired_state: DesiredState::Running,
             actual_state: ActualState::Accepted,
             runtime_task_id: None,
+            container_ip: None,
             exit_code: None,
             error: None,
             stopping_since_unix_secs: None,

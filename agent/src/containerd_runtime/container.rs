@@ -5,6 +5,7 @@ use containerd_client::services::v1::{Container, CreateContainerRequest};
 use containerd_client::{Client, with_namespace};
 use oci_spec::image::ImageConfiguration;
 use std::collections::HashMap;
+use std::path::Path;
 use tonic::Request;
 
 pub(super) async fn create_container(
@@ -14,9 +15,15 @@ pub(super) async fn create_container(
     snapshot_key: &str,
     image_config: &ImageConfiguration,
     args: Vec<String>,
+    network_namespace: Option<&Path>,
 ) -> RuntimeResult<()> {
     let mut containers = client.containers();
-    let spec = runtime_spec(task_id, image_config.config().as_ref(), args)?;
+    let spec = runtime_spec(
+        task_id,
+        image_config.config().as_ref(),
+        args,
+        network_namespace,
+    )?;
 
     containers
         .create(with_namespace!(

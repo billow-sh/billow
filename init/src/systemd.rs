@@ -116,6 +116,7 @@ fn agent_service_unit() -> String {
     let agent_install_path = paths::agent_install_path();
     let containerd_shim_path = paths::containerd_shim_install_path();
     let crun_path = paths::crun_install_path();
+    let cni_plugin_dir = paths::cni_plugin_dir();
 
     format!(
         "\
@@ -126,6 +127,12 @@ After=network.target {}
 
 [Service]
 Type=simple
+Environment={}={}
+Environment={}={}
+Environment={}={}
+Environment={}={}
+Environment={}={}
+Environment={}={}
 Environment={}={}
 Environment={}={}
 Environment={}={}
@@ -150,6 +157,18 @@ WantedBy=multi-user.target
         paths::TASK_DIR,
         paths::AGENT_WORKLOAD_DB_PATH_ENV,
         paths::WORKLOAD_DB_PATH,
+        paths::AGENT_CNI_PLUGIN_DIR_ENV,
+        paths::display(&cni_plugin_dir),
+        paths::AGENT_CNI_NETNS_DIR_ENV,
+        paths::CNI_NETNS_DIR,
+        paths::AGENT_CNI_IPAM_DIR_ENV,
+        paths::CNI_IPAM_DIR,
+        paths::AGENT_CNI_NETWORK_NAME_ENV,
+        paths::CNI_NETWORK_NAME,
+        paths::AGENT_CNI_BRIDGE_NAME_ENV,
+        paths::CNI_BRIDGE_NAME,
+        paths::AGENT_CNI_SUBNET_ENV,
+        paths::CNI_SUBNET,
         paths::display(&agent_install_path)
     )
 }
@@ -206,6 +225,12 @@ mod tests {
         assert!(
             unit.contains("Environment=BILLOW_WORKLOAD_DB_PATH=/var/lib/billow/workloads.sqlite3")
         );
+        assert!(unit.contains("Environment=BILLOW_CNI_PLUGIN_DIR="));
+        assert!(unit.contains("Environment=BILLOW_CNI_NETNS_DIR=/run/billow/netns"));
+        assert!(unit.contains("Environment=BILLOW_CNI_IPAM_DIR=/var/lib/billow/cni/ipam"));
+        assert!(unit.contains("Environment=BILLOW_CNI_NETWORK_NAME=billow-net"));
+        assert!(unit.contains("Environment=BILLOW_CNI_BRIDGE_NAME=billow0"));
+        assert!(unit.contains("Environment=BILLOW_CNI_SUBNET=10.1.1.0/24"));
         assert!(unit.contains("ExecStart="));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=multi-user.target"));

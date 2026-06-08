@@ -89,6 +89,7 @@ version = "0.1.0"
 dependencies = [
  "billow-api",
  "containerd-client",
+ "libc",
  "oci-spec",
  "prost",
  "prost-types",

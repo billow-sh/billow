@@ -13,6 +13,11 @@ const TEST_BINARIES: [(&str, &str); 4] = [
     ("containerd-shim-runc-v2", "fake shim\n"),
     ("crun", "fake crun\n"),
 ];
+const TEST_CNI_PLUGINS: [(&str, &str); 3] = [
+    ("bridge", "fake bridge\n"),
+    ("host-local", "fake host-local\n"),
+    ("loopback", "fake loopback\n"),
+];
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -37,9 +42,11 @@ impl Fixture {
         let systemd_runtime_dir = root.join("run-systemd-system");
         let fake_bin_dir = root.join("fake-bin");
         let empty_path_dir = root.join("empty-path");
+        let cni_download_dir = download_dir.join("cni");
 
         for dir in [
             &download_dir,
+            &cni_download_dir,
             &install_bin_dir,
             &config_dir,
             &systemd_unit_dir,
@@ -54,6 +61,10 @@ impl Fixture {
             .expect("failed to create fake init");
         for (name, contents) in TEST_BINARIES {
             fs::write(download_dir.join(name), contents).expect("failed to create fake binary");
+        }
+        for (name, contents) in TEST_CNI_PLUGINS {
+            fs::write(cni_download_dir.join(name), contents)
+                .expect("failed to create fake CNI plugin");
         }
         write_fake_systemctl(&fake_bin_dir).expect("failed to create fake systemctl");
 
@@ -112,6 +123,14 @@ impl Fixture {
 
     fn install_path(&self, name: &str) -> PathBuf {
         self.install_bin_dir.join(name)
+    }
+
+    fn cni_source_path(&self, name: &str) -> PathBuf {
+        self.download_dir.join("cni").join(name)
+    }
+
+    fn cni_install_path(&self, name: &str) -> PathBuf {
+        self.install_bin_dir.join("cni").join(name)
     }
 
     fn containerd_config_path(&self) -> PathBuf {
@@ -194,6 +213,15 @@ fn happy_path_installs_agent_unit_and_starts_service() {
     )));
     assert!(unit.contains("Environment=BILLOW_TASK_DIR=/run/billow/tasks"));
     assert!(unit.contains("Environment=BILLOW_WORKLOAD_DB_PATH=/var/lib/billow/workloads.sqlite3"));
+    assert!(unit.contains(&format!(
+        "Environment=BILLOW_CNI_PLUGIN_DIR={}",
+        fixture.install_bin_dir.join("cni").display()
+    )));
+    assert!(unit.contains("Environment=BILLOW_CNI_NETNS_DIR=/run/billow/netns"));
+    assert!(unit.contains("Environment=BILLOW_CNI_IPAM_DIR=/var/lib/billow/cni/ipam"));
+    assert!(unit.contains("Environment=BILLOW_CNI_NETWORK_NAME=billow-net"));
+    assert!(unit.contains("Environment=BILLOW_CNI_BRIDGE_NAME=billow0"));
+    assert!(unit.contains("Environment=BILLOW_CNI_SUBNET=10.1.1.0/24"));
     assert!(unit.contains("Restart=on-failure"));
     assert_mode(fixture.service_path(), 0o644);
 
@@ -329,6 +357,7 @@ fn fails_when_agent_is_already_installed() {
     assert!(!fixture.install_path("containerd").exists());
     assert!(!fixture.install_path("containerd-shim-runc-v2").exists());
     assert!(!fixture.install_path("crun").exists());
+    assert!(!fixture.cni_install_path("bridge").exists());
     assert!(!fixture.service_path().exists());
     assert!(!fixture.containerd_service_path().exists());
     assert_eq!(fixture.systemctl_log(), "--version\n");
@@ -450,6 +479,21 @@ fn fails_when_crun_source_is_missing() {
 }
 
 #[test]
+fn fails_when_cni_plugin_source_is_missing() {
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.cni_source_path("bridge")).expect("failed to remove source bridge");
+
+    let output = fixture.run();
+
+    assert_failure_contains(&output, "bridge must be present in the cni directory");
+    assert_all_sources_exist_except(&fixture, "bridge");
+    assert_no_binaries_installed(&fixture);
+    assert!(!fixture.service_path().exists());
+    assert!(!fixture.containerd_service_path().exists());
+    assert_eq!(fixture.systemctl_log(), "--version\n");
+}
+
+#[test]
 fn fails_when_daemon_reload_fails() {
     let fixture = Fixture::new();
     fixture.fail_systemctl_command("daemon-reload");
@@ -563,6 +607,30 @@ fn assert_all_sources_exist(fixture: &Fixture) {
             "expected source {name} to exist"
         );
     }
+    for (name, _) in TEST_CNI_PLUGINS {
+        assert!(
+            fixture.cni_source_path(name).exists(),
+            "expected CNI source {name} to exist"
+        );
+    }
+}
+
+fn assert_all_sources_exist_except(fixture: &Fixture, missing_name: &str) {
+    for (name, _) in TEST_BINARIES {
+        assert!(
+            fixture.source_path(name).exists(),
+            "expected source {name} to exist"
+        );
+    }
+    for (name, _) in TEST_CNI_PLUGINS {
+        if name == missing_name {
+            continue;
+        }
+        assert!(
+            fixture.cni_source_path(name).exists(),
+            "expected CNI source {name} to exist"
+        );
+    }
 }
 
 fn assert_all_sources_moved(fixture: &Fixture) {
@@ -572,6 +640,12 @@ fn assert_all_sources_moved(fixture: &Fixture) {
             "expected source {name} to be moved"
         );
     }
+    for (name, _) in TEST_CNI_PLUGINS {
+        assert!(
+            !fixture.cni_source_path(name).exists(),
+            "expected CNI source {name} to be moved"
+        );
+    }
 }
 
 fn assert_no_binaries_installed(fixture: &Fixture) {
@@ -579,6 +653,12 @@ fn assert_no_binaries_installed(fixture: &Fixture) {
         assert!(
             !fixture.install_path(name).exists(),
             "expected installed {name} to be absent"
+        );
+    }
+    for (name, _) in TEST_CNI_PLUGINS {
+        assert!(
+            !fixture.cni_install_path(name).exists(),
+            "expected installed CNI plugin {name} to be absent"
         );
     }
 }
@@ -591,6 +671,14 @@ fn assert_all_binaries_installed(fixture: &Fixture) {
             contents
         );
         assert_mode(fixture.install_path(name), 0o755);
+    }
+    for (name, contents) in TEST_CNI_PLUGINS {
+        assert_eq!(
+            fs::read_to_string(fixture.cni_install_path(name))
+                .expect("failed to read installed CNI plugin"),
+            contents
+        );
+        assert_mode(fixture.cni_install_path(name), 0o755);
     }
 }
 

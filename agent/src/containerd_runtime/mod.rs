@@ -2,6 +2,7 @@ mod cleanup;
 mod container;
 mod image;
 mod namespace;
+mod network;
 mod reference;
 mod rootfs;
 mod run_io;
@@ -9,7 +10,7 @@ mod spec;
 
 use crate::workload::runtime::{
     ContainerRuntime, RuntimeCleanupMode, RuntimeLogSource, RuntimeLogs, RuntimeStartRequest,
-    RuntimeStopMode, RuntimeTaskState, RuntimeTaskStatus,
+    RuntimeStartResult, RuntimeStopMode, RuntimeTaskState, RuntimeTaskStatus,
 };
 use crate::workload::types::{WorkloadError, WorkloadResult, env_path_or_default};
 use cleanup::RunCleanup;
@@ -19,8 +20,9 @@ use containerd_client::types::v1::Status as ContainerdTaskStatus;
 use containerd_client::{Client, with_namespace};
 use image::{image_command, load_image_config, pull_image};
 use namespace::ensure_namespace;
+use network::NetworkConfig;
 use reference::normalize_image_reference;
-use rootfs::prepare_rootfs;
+use rootfs::{prepare_rootfs, wait_for_mount_sources};
 use run_io::{StdioPaths, create_stdio_files, create_task_dir, path_string, read_bounded};
 use spec::runc_options;
 use std::error::Error;
@@ -55,22 +57,22 @@ pub(crate) struct ContainerdRuntime {
     shim_path: PathBuf,
     crun_path: PathBuf,
     task_dir: PathBuf,
+    network: NetworkConfig,
     client: Arc<OnceCell<Client>>,
 }
 
-impl Default for ContainerdRuntime {
-    fn default() -> Self {
-        Self {
+impl ContainerdRuntime {
+    pub(crate) fn from_env() -> RuntimeResult<Self> {
+        Ok(Self {
             socket_path: env_path_or_default(CONTAINERD_SOCKET_ENV, DEFAULT_CONTAINERD_SOCKET),
             shim_path: env_path_or_default(CONTAINERD_SHIM_ENV, DEFAULT_CONTAINERD_SHIM),
             crun_path: env_path_or_default(CRUN_ENV, DEFAULT_CRUN),
             task_dir: env_path_or_default(TASK_DIR_ENV, DEFAULT_TASK_DIR),
+            network: NetworkConfig::from_env()?,
             client: Arc::new(OnceCell::new()),
-        }
+        })
     }
-}
 
-impl ContainerdRuntime {
     async fn start_inner(
         &self,
         client: &Client,
@@ -79,17 +81,41 @@ impl ContainerdRuntime {
         snapshot_key: &str,
         run_dir: &std::path::Path,
         cleanup: &mut RunCleanup,
-    ) -> RuntimeResult<()> {
+    ) -> RuntimeResult<RuntimeStartResult> {
         ensure_namespace(client).await?;
         pull_image(client, image).await?;
 
         let image_config = load_image_config(client, image).await?;
         let args = image_command(image_config.config().as_ref())?;
+        let netns_path = self.network.netns_path(task_id);
+
+        // The container is created before the snapshot is prepared so containerd's garbage
+        // collector does not reap the snapshot before a container references it.
+        create_container(
+            client,
+            image,
+            task_id,
+            snapshot_key,
+            &image_config,
+            args,
+            Some(&netns_path),
+        )
+        .await?;
+        cleanup.mark_container_created();
+
         let rootfs = prepare_rootfs(client, snapshot_key, image_config.rootfs().diff_ids()).await?;
         cleanup.mark_snapshot_created();
+        wait_for_mount_sources(&rootfs).await?;
 
-        create_container(client, image, task_id, snapshot_key, &image_config, args).await?;
-        cleanup.mark_container_created();
+        let container_ip = {
+            let network = self.network.clone();
+            let task_id = task_id.to_string();
+            let run_dir = run_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || network.setup(&task_id, &run_dir))
+                .await
+                .map_err(|error| runtime_error(format!("network setup task panicked: {error}")))??
+        };
+        cleanup.mark_network_created();
 
         let stdio = create_stdio_files(run_dir)?;
         let mut tasks = client.tasks();
@@ -121,7 +147,9 @@ impl ContainerdRuntime {
             ))
             .await?;
 
-        Ok(())
+        Ok(RuntimeStartResult {
+            container_ip: Some(container_ip),
+        })
     }
 
     async fn connect(&self) -> RuntimeResult<&Client> {
@@ -160,7 +188,7 @@ impl ContainerRuntime for ContainerdRuntime {
         }
     }
 
-    async fn start(&self, request: RuntimeStartRequest) -> WorkloadResult<()> {
+    async fn start(&self, request: RuntimeStartRequest) -> WorkloadResult<RuntimeStartResult> {
         let image = normalize_image_reference(&request.image).map_err(workload_runtime_error)?;
         let snapshot_key = Self::snapshot_key(&request.runtime_task_id);
         let run_dir = self.run_dir(&request.runtime_task_id);
@@ -172,6 +200,7 @@ impl ContainerRuntime for ContainerdRuntime {
             request.runtime_task_id.clone(),
             snapshot_key.clone(),
             run_dir.clone(),
+            self.network.clone(),
         );
         match self
             .start_inner(
@@ -184,9 +213,13 @@ impl ContainerRuntime for ContainerdRuntime {
             )
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(result) => Ok(result),
             Err(error) => {
-                let cleanup_result = cleanup.cleanup(client, false).await;
+                let cleanup_result = async {
+                    cleanup.release(client).await?;
+                    cleanup.prune(client, false).await
+                }
+                .await;
                 match cleanup_result {
                     Ok(()) => Err(workload_runtime_error(error)),
                     Err(cleanup_error) => Err(workload_runtime_error(runtime_error(format!(
@@ -269,15 +302,33 @@ impl ContainerRuntime for ContainerdRuntime {
         }
     }
 
-    async fn cleanup(&self, runtime_task_id: &str, mode: RuntimeCleanupMode) -> WorkloadResult<()> {
+    async fn release_container(&self, runtime_task_id: &str) -> WorkloadResult<()> {
+        let client = self.connect().await.map_err(workload_runtime_error)?;
+        RunCleanup::existing(
+            runtime_task_id.to_string(),
+            Self::snapshot_key(runtime_task_id),
+            self.run_dir(runtime_task_id),
+            self.network.clone(),
+        )
+        .release(client)
+        .await
+        .map_err(workload_runtime_error)
+    }
+
+    async fn prune_run(
+        &self,
+        runtime_task_id: &str,
+        mode: RuntimeCleanupMode,
+    ) -> WorkloadResult<()> {
         let client = self.connect().await.map_err(workload_runtime_error)?;
         let remove_run_dir = mode == RuntimeCleanupMode::RemoveLogs;
         RunCleanup::existing(
             runtime_task_id.to_string(),
             Self::snapshot_key(runtime_task_id),
             self.run_dir(runtime_task_id),
+            self.network.clone(),
         )
-        .cleanup(client, remove_run_dir)
+        .prune(client, remove_run_dir)
         .await
         .map_err(workload_runtime_error)
     }
@@ -301,6 +352,12 @@ impl ContainerRuntime for ContainerdRuntime {
         .await
         .map_err(|error| workload_runtime_error(Box::new(error)))?
         .map_err(workload_runtime_error)
+    }
+
+    async fn container_ip(&self, runtime_task_id: &str) -> WorkloadResult<Option<String>> {
+        self.network
+            .container_ip(&self.run_dir(runtime_task_id))
+            .map_err(workload_runtime_error)
     }
 }
 

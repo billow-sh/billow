@@ -24,4 +24,8 @@ Other important files include:
 ## Practices
 - Use `cargo add` / `cargo remove` instead of modifying Cargo.toml directly
 - Run `just vm-test` outside the sandbox after every significant code change
- 
+- Do not add code comments unless requested
+
+**Temporary note:**
+The application is in development and has no persistent users - database changes should be folded into existing schema creation, without a migration mechanism.
+

@@ -140,6 +140,7 @@ pub(crate) struct Workload {
     pub(crate) desired_state: DesiredState,
     pub(crate) actual_state: ActualState,
     pub(crate) runtime_task_id: Option<String>,
+    pub(crate) container_ip: Option<String>,
     pub(crate) exit_code: Option<u32>,
     pub(crate) error: Option<String>,
     pub(crate) stopping_since_unix_secs: Option<i64>,
@@ -160,6 +161,7 @@ impl Workload {
             desired_state: self.desired_state.to_proto() as i32,
             actual_state: self.actual_state.to_proto() as i32,
             runtime_task_id: self.runtime_task_id.clone().unwrap_or_default(),
+            container_ip: self.container_ip.clone().unwrap_or_default(),
             exit_code: self.exit_code,
             error: self.error.clone().unwrap_or_default(),
             created_at_unix_secs: self.created_at_unix_secs,
@@ -176,14 +178,6 @@ pub(crate) enum CleanupState {
 }
 
 impl CleanupState {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Done => "done",
-            Self::Failed => "failed",
-        }
-    }
-
     pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(Self::Pending),
@@ -198,6 +192,10 @@ impl CleanupState {
 pub(crate) struct WorkloadRun {
     pub(crate) workload_id: String,
     pub(crate) runtime_task_id: String,
+    pub(crate) container_ip: Option<String>,
+    pub(crate) container_released: bool,
+    pub(crate) release_attempts: i64,
+    pub(crate) last_release_error: Option<String>,
     pub(crate) cleanup_state: CleanupState,
     pub(crate) cleanup_attempts: i64,
     pub(crate) last_cleanup_error: Option<String>,
@@ -275,6 +273,13 @@ pub(crate) fn env_path_or_default(env_name: &str, default: &str) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(default))
+}
+
+pub(crate) fn env_string_or_default(env_name: &str, default: &str) -> String {
+    env::var(env_name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 pub(crate) fn env_duration_or_default(env_name: &str, default_secs: u64) -> Duration {

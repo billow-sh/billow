@@ -220,6 +220,7 @@ fn print_workload(writer: &mut impl Write, response: &WorkloadResponse) -> io::R
         actual_state_name(response.actual_state)
     )?;
     writeln!(writer, "runtime_task_id={}", response.runtime_task_id)?;
+    writeln!(writer, "container_ip={}", response.container_ip)?;
     if let Some(exit_code) = response.exit_code {
         writeln!(writer, "exit_code={exit_code}")?;
     } else {
@@ -282,6 +283,7 @@ mod tests {
             desired_state: billow_api::api::DesiredState::Running as i32,
             actual_state: actual_state as i32,
             runtime_task_id: String::from("task-1"),
+            container_ip: String::from("10.1.1.2"),
             exit_code: Some(0),
             error: String::new(),
             created_at_unix_secs: 10,
@@ -303,6 +305,7 @@ mod tests {
         assert!(output.contains("kind=service\n"));
         assert!(output.contains("desired_state=running\n"));
         assert!(output.contains("actual_state=running\n"));
+        assert!(output.contains("container_ip=10.1.1.2\n"));
     }
 
     #[test]

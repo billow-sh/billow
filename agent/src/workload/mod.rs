@@ -112,6 +112,7 @@ impl WorkloadManager {
             desired_state,
             actual_state: ActualState::Accepted,
             runtime_task_id: None,
+            container_ip: None,
             exit_code: None,
             error: None,
             stopping_since_unix_secs: None,
@@ -221,7 +222,7 @@ pub(crate) fn error_status(error: WorkloadError) -> tonic::Status {
 mod tests {
     use super::runtime::{
         ContainerRuntime, RuntimeCleanupMode, RuntimeLogSource, RuntimeLogs, RuntimeStartRequest,
-        RuntimeStopMode, RuntimeTaskState, RuntimeTaskStatus,
+        RuntimeStartResult, RuntimeStopMode, RuntimeTaskState, RuntimeTaskStatus,
     };
     use super::storage::WorkloadStorage;
     use super::types::{
@@ -230,12 +231,13 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::fs;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
     struct FakeTask {
         state: RuntimeTaskState,
         exit_code: Option<u32>,
+        container_ip: Option<String>,
     }
 
     #[derive(Clone)]
@@ -250,11 +252,13 @@ mod tests {
         logs: Mutex<HashMap<String, FakeLogs>>,
         starts: Mutex<Vec<String>>,
         stops: Mutex<Vec<(String, RuntimeStopMode)>>,
-        cleanups: Mutex<Vec<(String, RuntimeCleanupMode)>>,
+        releases: Mutex<Vec<String>>,
+        prunes: Mutex<Vec<(String, RuntimeCleanupMode)>>,
         ignore_graceful_stops: Mutex<bool>,
         ignore_force_stops: Mutex<bool>,
         start_failures_remaining: Mutex<usize>,
-        cleanup_failures_remaining: Mutex<usize>,
+        release_failures_remaining: Mutex<usize>,
+        prune_failures_remaining: Mutex<usize>,
     }
 
     impl FakeRuntime {
@@ -271,8 +275,12 @@ mod tests {
             *self.start_failures_remaining.lock().unwrap() = count;
         }
 
-        fn fail_next_cleanups(&self, count: usize) {
-            *self.cleanup_failures_remaining.lock().unwrap() = count;
+        fn fail_next_releases(&self, count: usize) {
+            *self.release_failures_remaining.lock().unwrap() = count;
+        }
+
+        fn fail_next_prunes(&self, count: usize) {
+            *self.prune_failures_remaining.lock().unwrap() = count;
         }
 
         fn insert_running_task(&self, runtime_task_id: &str) {
@@ -281,6 +289,7 @@ mod tests {
                 FakeTask {
                     state: RuntimeTaskState::Running,
                     exit_code: None,
+                    container_ip: Some(String::from("10.1.1.2")),
                 },
             );
             self.logs.lock().unwrap().insert(
@@ -298,6 +307,7 @@ mod tests {
                 FakeTask {
                     state: RuntimeTaskState::Created,
                     exit_code: None,
+                    container_ip: Some(String::from("10.1.1.2")),
                 },
             );
             self.logs.lock().unwrap().insert(
@@ -359,12 +369,12 @@ mod tests {
                 .count()
         }
 
-        fn cleanup_count(&self) -> usize {
-            self.cleanups.lock().unwrap().len()
+        fn prune_count(&self) -> usize {
+            self.prunes.lock().unwrap().len()
         }
 
-        fn remove_log_cleanup_count(&self) -> usize {
-            self.cleanups
+        fn remove_log_prune_count(&self) -> usize {
+            self.prunes
                 .lock()
                 .unwrap()
                 .iter()
@@ -372,8 +382,8 @@ mod tests {
                 .count()
         }
 
-        fn preserve_log_cleanup_count(&self) -> usize {
-            self.cleanups
+        fn preserve_log_prune_count(&self) -> usize {
+            self.prunes
                 .lock()
                 .unwrap()
                 .iter()
@@ -390,7 +400,7 @@ mod tests {
             }
         }
 
-        async fn start(&self, request: RuntimeStartRequest) -> WorkloadResult<()> {
+        async fn start(&self, request: RuntimeStartRequest) -> WorkloadResult<RuntimeStartResult> {
             self.starts
                 .lock()
                 .unwrap()
@@ -406,21 +416,25 @@ mod tests {
                 .unwrap()
                 .insert(request.runtime_task_id.clone(), FakeLogs { stdout, stderr });
 
-            let mut failures_remaining = self.start_failures_remaining.lock().unwrap();
-            if *failures_remaining > 0 {
-                *failures_remaining -= 1;
-                return Err(WorkloadError::internal("fake runtime start failed"));
+            {
+                let mut failures_remaining = self.start_failures_remaining.lock().unwrap();
+                if *failures_remaining > 0 {
+                    *failures_remaining -= 1;
+                    return Err(WorkloadError::internal("fake runtime start failed"));
+                }
             }
-            drop(failures_remaining);
 
             self.tasks.lock().unwrap().insert(
                 request.runtime_task_id.clone(),
                 FakeTask {
                     state: RuntimeTaskState::Running,
                     exit_code: None,
+                    container_ip: Some(String::from("10.1.1.2")),
                 },
             );
-            Ok(())
+            Ok(RuntimeStartResult {
+                container_ip: Some(String::from("10.1.1.2")),
+            })
         }
 
         async fn inspect(
@@ -455,23 +469,38 @@ mod tests {
             Ok(())
         }
 
-        async fn cleanup(
-            &self,
-            runtime_task_id: &str,
-            mode: RuntimeCleanupMode,
-        ) -> WorkloadResult<()> {
-            self.cleanups
+        async fn release_container(&self, runtime_task_id: &str) -> WorkloadResult<()> {
+            self.releases
                 .lock()
                 .unwrap()
-                .push((runtime_task_id.to_string(), mode));
-            let mut failures_remaining = self.cleanup_failures_remaining.lock().unwrap();
+                .push(runtime_task_id.to_string());
+            let mut failures_remaining = self.release_failures_remaining.lock().unwrap();
             if *failures_remaining > 0 {
                 *failures_remaining -= 1;
-                return Err(WorkloadError::internal("fake runtime cleanup failed"));
+                return Err(WorkloadError::internal("fake runtime release failed"));
             }
             drop(failures_remaining);
 
             self.tasks.lock().unwrap().remove(runtime_task_id);
+            Ok(())
+        }
+
+        async fn prune_run(
+            &self,
+            runtime_task_id: &str,
+            mode: RuntimeCleanupMode,
+        ) -> WorkloadResult<()> {
+            self.prunes
+                .lock()
+                .unwrap()
+                .push((runtime_task_id.to_string(), mode));
+            let mut failures_remaining = self.prune_failures_remaining.lock().unwrap();
+            if *failures_remaining > 0 {
+                *failures_remaining -= 1;
+                return Err(WorkloadError::internal("fake runtime prune failed"));
+            }
+            drop(failures_remaining);
+
             if mode == RuntimeCleanupMode::RemoveLogs {
                 self.logs.lock().unwrap().remove(runtime_task_id);
             }
@@ -500,6 +529,15 @@ mod tests {
                 stdout_truncated,
                 stderr_truncated,
             })
+        }
+
+        async fn container_ip(&self, runtime_task_id: &str) -> WorkloadResult<Option<String>> {
+            Ok(self
+                .tasks
+                .lock()
+                .unwrap()
+                .get(runtime_task_id)
+                .and_then(|task| task.container_ip.clone()))
         }
     }
 
@@ -573,7 +611,23 @@ mod tests {
 
         let running = submit_and_reach_running(&manager, WorkloadKind::Service, "nginx").await;
         assert_eq!(running.actual_state, ActualState::Running);
+        assert_eq!(running.container_ip.as_deref(), Some("10.1.1.2"));
         assert_eq!(runtime.start_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_clears_latest_container_ip() {
+        let (manager, _runtime) = test_manager();
+        let running = submit_and_reach_running(&manager, WorkloadKind::Service, "nginx").await;
+
+        manager.stop(&running.id).await.unwrap();
+        manager.reconcile_once().await.unwrap();
+        manager.watch_once().await.unwrap();
+        manager.reconcile_once().await.unwrap();
+
+        let stopped = manager.get(&running.id).unwrap();
+        assert_eq!(stopped.actual_state, ActualState::Stopped);
+        assert_eq!(stopped.container_ip, None);
     }
 
     #[tokio::test]
@@ -636,8 +690,8 @@ mod tests {
         let restarted = manager.get(&running.id).unwrap();
         assert_eq!(restarted.actual_state, ActualState::Running);
         assert_ne!(restarted.runtime_task_id.unwrap(), first_task_id);
-        assert_eq!(runtime.cleanup_count(), 2);
-        assert_eq!(runtime.remove_log_cleanup_count(), 1);
+        assert_eq!(runtime.prune_count(), 2);
+        assert_eq!(runtime.remove_log_prune_count(), 1);
         assert_eq!(runtime.start_count(), 2);
     }
 
@@ -692,21 +746,26 @@ mod tests {
         runtime.set_stopped(running.runtime_task_id.as_deref().unwrap(), 0);
         manager.watch_once().await.unwrap();
 
-        runtime.fail_next_cleanups(1);
+        runtime.fail_next_prunes(1);
         manager.reconcile_once().await.unwrap();
 
         let stopped = manager.get(&running.id).unwrap();
         assert_eq!(stopped.actual_state, ActualState::Stopped);
         assert_eq!(stopped.exit_code, Some(0));
         let run = manager.storage.latest_run(&running.id).unwrap().unwrap();
+        assert!(run.container_released);
         assert_eq!(run.cleanup_state, CleanupState::Pending);
         assert_eq!(run.cleanup_attempts, 1);
         assert!(run.last_cleanup_error.is_some());
 
+        manager
+            .storage
+            .backdate_run_for_test(&run.runtime_task_id, now_unix_secs().saturating_sub(3600))
+            .unwrap();
         manager.reconcile_once().await.unwrap();
         let run = manager.storage.latest_run(&running.id).unwrap().unwrap();
         assert_eq!(run.cleanup_state, CleanupState::Done);
-        assert_eq!(runtime.cleanup_count(), 2);
+        assert_eq!(runtime.prune_count(), 2);
     }
 
     #[tokio::test]
@@ -792,10 +851,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_with_cleanup_failures_tombstones_with_failed_run_cleanup() {
+    async fn delete_blocks_tombstone_until_container_released() {
         let (manager, runtime) = test_manager();
         let running = submit_and_reach_running(&manager, WorkloadKind::Service, "nginx").await;
-        runtime.fail_next_cleanups(3);
+        runtime.fail_next_releases(1);
 
         manager.delete(&running.id).await.unwrap();
         manager.reconcile_once().await.unwrap();
@@ -805,35 +864,39 @@ mod tests {
             ActualState::Stopped
         );
 
-        for _ in 0..3 {
-            manager.reconcile_once().await.unwrap();
-        }
+        manager.reconcile_once().await.unwrap();
+        let blocked = manager.get(&running.id).unwrap();
+        assert_eq!(blocked.actual_state, ActualState::Stopped);
+        let run = manager.storage.latest_run(&running.id).unwrap().unwrap();
+        assert!(!run.container_released);
+        assert!(run.last_release_error.is_some());
+
+        manager
+            .storage
+            .backdate_run_for_test(&run.runtime_task_id, now_unix_secs().saturating_sub(3600))
+            .unwrap();
+        manager.reconcile_once().await.unwrap();
 
         let deleted = manager.get(&running.id).unwrap();
         assert_eq!(deleted.actual_state, ActualState::Deleted);
-        let run = manager.storage.latest_run(&running.id).unwrap().unwrap();
-        assert_eq!(run.cleanup_state, CleanupState::Failed);
-        assert_eq!(run.cleanup_attempts, 3);
     }
 
     #[tokio::test]
-    async fn failed_run_cleanup_blocks_restart_until_retry_succeeds() {
+    async fn failed_run_release_failure_blocks_restart_until_retry_succeeds() {
         let (manager, runtime) = test_manager();
         let running = submit_and_reach_running(&manager, WorkloadKind::Service, "nginx").await;
         let leaked_task_id = running.runtime_task_id.clone().unwrap();
 
-        runtime.fail_next_cleanups(3);
+        runtime.fail_next_releases(1);
         runtime.set_stopped(&leaked_task_id, 1);
         manager.watch_once().await.unwrap();
 
-        for _ in 0..3 {
-            manager.reconcile_once().await.unwrap();
-        }
-
+        manager.reconcile_once().await.unwrap();
         let backing_off = manager.get(&running.id).unwrap();
         assert_eq!(backing_off.actual_state, ActualState::Failed);
         let run = manager.storage.latest_run(&running.id).unwrap().unwrap();
-        assert_eq!(run.cleanup_state, CleanupState::Failed);
+        assert!(!run.container_released);
+        assert!(run.last_release_error.is_some());
 
         expire_restart_backoff(&manager, &running.id);
         manager.reconcile_once().await.unwrap();
@@ -852,6 +915,7 @@ mod tests {
             .storage
             .backdate_run_for_test(&leaked_task_id, now_unix_secs().saturating_sub(3600))
             .unwrap();
+        expire_restart_backoff(&manager, &running.id);
         manager.reconcile_once().await.unwrap();
 
         let restarted = manager.get(&running.id).unwrap();
@@ -1124,7 +1188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_creating_with_failed_cleanup_keeps_orphan_run() {
+    async fn recover_creating_with_release_failure_keeps_orphan_run() {
         let (manager, runtime) = test_manager();
         let workload = manager
             .submit(WorkloadKind::Service, String::from("nginx"))
@@ -1137,18 +1201,21 @@ mod tests {
                 .begin_start(&workload.id, ActualState::Accepted, &runtime_task_id)
                 .unwrap()
         );
-        runtime.fail_next_cleanups(3);
+        runtime.fail_next_releases(1);
 
-        for _ in 0..3 {
-            manager.reconcile_once().await.unwrap();
-        }
+        manager.reconcile_once().await.unwrap();
 
         let recovered = manager.get(&workload.id).unwrap();
         assert_eq!(recovered.actual_state, ActualState::Creating);
         let failed_run = manager.storage.latest_run(&workload.id).unwrap().unwrap();
         assert_eq!(failed_run.runtime_task_id, runtime_task_id);
-        assert_eq!(failed_run.cleanup_state, CleanupState::Failed);
+        assert!(!failed_run.container_released);
+        assert!(failed_run.last_release_error.is_some());
 
+        manager
+            .storage
+            .backdate_run_for_test(&runtime_task_id, now_unix_secs().saturating_sub(3600))
+            .unwrap();
         manager.reconcile_once().await.unwrap();
         assert_eq!(
             manager.get(&workload.id).unwrap().actual_state,
@@ -1348,8 +1415,8 @@ mod tests {
             manager.get(&workload.id).unwrap().actual_state,
             ActualState::Failed
         );
-        assert_eq!(runtime.preserve_log_cleanup_count(), 1);
-        assert_eq!(runtime.remove_log_cleanup_count(), 0);
+        assert_eq!(runtime.preserve_log_prune_count(), 1);
+        assert_eq!(runtime.remove_log_prune_count(), 0);
         let logs = manager.get_logs(&workload.id).await.unwrap();
         assert_eq!(logs.stderr, b"start worker process\n");
     }

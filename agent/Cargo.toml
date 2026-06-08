@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 billow-api.workspace = true
 containerd-client = "0.9.0"
+libc = "0.2.186"
 oci-spec = "0.10.0"
 prost.workspace = true
 prost-types = "0.14.3"

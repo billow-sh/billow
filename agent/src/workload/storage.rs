@@ -75,6 +75,10 @@ impl WorkloadStorage {
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     workload_id TEXT NOT NULL REFERENCES workloads(id) ON DELETE CASCADE,
                     runtime_task_id TEXT NOT NULL UNIQUE,
+                    container_ip TEXT,
+                    container_released INTEGER NOT NULL DEFAULT 0,
+                    release_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_release_error TEXT,
                     cleanup_state TEXT NOT NULL DEFAULT 'pending',
                     cleanup_attempts INTEGER NOT NULL DEFAULT 0,
                     last_cleanup_error TEXT,
@@ -468,10 +472,10 @@ impl WorkloadStorage {
             .execute(
                 "\
                 INSERT INTO workload_runs (
-                    workload_id, runtime_task_id, cleanup_state, cleanup_attempts,
+                    workload_id, runtime_task_id, container_ip, cleanup_state, cleanup_attempts,
                     last_cleanup_error, created_at_unix_secs, updated_at_unix_secs
                 )
-                VALUES (?1, ?2, 'pending', 0, NULL, ?3, ?4)
+                VALUES (?1, ?2, NULL, 'pending', 0, NULL, ?3, ?4)
                 ",
                 params![workload_id, runtime_task_id, now, now],
             )
@@ -480,7 +484,70 @@ impl WorkloadStorage {
         Ok(true)
     }
 
-    pub(crate) fn mark_run_cleanup_done(&self, runtime_task_id: &str) -> WorkloadResult<()> {
+    pub(crate) fn set_run_container_ip(
+        &self,
+        runtime_task_id: &str,
+        container_ip: Option<&str>,
+    ) -> WorkloadResult<()> {
+        let updated_at = now_unix_secs();
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "\
+                UPDATE workload_runs
+                SET container_ip = ?2,
+                    updated_at_unix_secs = ?3
+                WHERE runtime_task_id = ?1
+                ",
+                params![runtime_task_id, container_ip, updated_at],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_container_released(&self, runtime_task_id: &str) -> WorkloadResult<()> {
+        let updated_at = now_unix_secs();
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "\
+                UPDATE workload_runs
+                SET container_released = 1,
+                    container_ip = NULL,
+                    last_release_error = NULL,
+                    updated_at_unix_secs = ?2
+                WHERE runtime_task_id = ?1
+                ",
+                params![runtime_task_id, updated_at],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_release_failure(
+        &self,
+        runtime_task_id: &str,
+        release_attempts: i64,
+        error: &str,
+    ) -> WorkloadResult<()> {
+        let updated_at = now_unix_secs();
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "\
+                UPDATE workload_runs
+                SET release_attempts = ?2,
+                    last_release_error = ?3,
+                    updated_at_unix_secs = ?4
+                WHERE runtime_task_id = ?1
+                ",
+                params![runtime_task_id, release_attempts, error, updated_at],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_run_prune_done(&self, runtime_task_id: &str) -> WorkloadResult<()> {
         let updated_at = now_unix_secs();
         let connection = self.connection()?;
         connection
@@ -488,6 +555,7 @@ impl WorkloadStorage {
                 "\
                 UPDATE workload_runs
                 SET cleanup_state = 'done',
+                    container_ip = NULL,
                     last_cleanup_error = NULL,
                     updated_at_unix_secs = ?2
                 WHERE runtime_task_id = ?1
@@ -498,10 +566,9 @@ impl WorkloadStorage {
         Ok(())
     }
 
-    pub(crate) fn record_run_cleanup_failure(
+    pub(crate) fn record_run_prune_failure(
         &self,
         runtime_task_id: &str,
-        cleanup_state: CleanupState,
         cleanup_attempts: i64,
         error: &str,
     ) -> WorkloadResult<()> {
@@ -511,19 +578,13 @@ impl WorkloadStorage {
             .execute(
                 "\
                 UPDATE workload_runs
-                SET cleanup_state = ?2,
-                    cleanup_attempts = ?3,
-                    last_cleanup_error = ?4,
-                    updated_at_unix_secs = ?5
+                SET cleanup_state = 'pending',
+                    cleanup_attempts = ?2,
+                    last_cleanup_error = ?3,
+                    updated_at_unix_secs = ?4
                 WHERE runtime_task_id = ?1
                 ",
-                params![
-                    runtime_task_id,
-                    cleanup_state.as_str(),
-                    cleanup_attempts,
-                    error,
-                    updated_at
-                ],
+                params![runtime_task_id, cleanup_attempts, error, updated_at],
             )
             .map_err(sql_error)?;
         Ok(())
@@ -537,10 +598,14 @@ impl WorkloadStorage {
                 SELECT
                     workload_id,
                     runtime_task_id,
+                    container_ip,
                     cleanup_state,
                     cleanup_attempts,
                     last_cleanup_error,
-                    updated_at_unix_secs
+                    updated_at_unix_secs,
+                    container_released,
+                    release_attempts,
+                    last_release_error
                 FROM workload_runs
                 WHERE workload_id = ?1
                 ORDER BY id DESC
@@ -554,7 +619,6 @@ impl WorkloadStorage {
     }
 
     pub(crate) fn list_prunable_runs(&self) -> WorkloadResult<Vec<WorkloadRun>> {
-        let now = now_unix_secs();
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
@@ -562,34 +626,26 @@ impl WorkloadStorage {
                 SELECT
                     workload_id,
                     runtime_task_id,
+                    container_ip,
                     cleanup_state,
                     cleanup_attempts,
                     last_cleanup_error,
-                    updated_at_unix_secs
+                    updated_at_unix_secs,
+                    container_released,
+                    release_attempts,
+                    last_release_error
                 FROM workload_runs
                 WHERE id NOT IN (
                     SELECT MAX(id)
                     FROM workload_runs
                     GROUP BY workload_id
                   )
-                  AND (
-                    cleanup_state = ?4
-                    OR ?1 - updated_at_unix_secs >= min(?2 * cleanup_attempts, ?3)
-                  )
                 ORDER BY id
                 ",
             )
             .map_err(sql_error)?;
         let runs = statement
-            .query_map(
-                params![
-                    now,
-                    CLEANUP_RETRY_BACKOFF_SECS,
-                    CLEANUP_RETRY_BACKOFF_CAP_SECS,
-                    CleanupState::Done.as_str(),
-                ],
-                run_from_row,
-            )
+            .query_map([], run_from_row)
             .map_err(sql_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(sql_error)?;
@@ -738,6 +794,7 @@ fn workload_query(predicate: &str) -> String {
             w.desired_state,
             w.actual_state,
             latest_run.runtime_task_id,
+            latest_run.container_ip,
             w.exit_code,
             w.error,
             w.stopping_since_unix_secs,
@@ -749,7 +806,7 @@ fn workload_query(predicate: &str) -> String {
             w.updated_at_unix_secs
         FROM workloads w
         LEFT JOIN (
-            SELECT r.workload_id, r.runtime_task_id
+            SELECT r.workload_id, r.runtime_task_id, r.container_ip
             FROM workload_runs r
             JOIN (
                 SELECT workload_id, MAX(id) AS max_id
@@ -775,28 +832,33 @@ fn workload_from_row(row: &Row<'_>) -> rusqlite::Result<Workload> {
         actual_state: ActualState::from_str(&actual_state)
             .ok_or_else(|| invalid_text("actual_state", &actual_state))?,
         runtime_task_id: row.get(5)?,
-        exit_code: row.get(6)?,
-        error: row.get(7)?,
-        stopping_since_unix_secs: row.get(8)?,
-        runtime_unknown_since_unix_secs: row.get(9)?,
-        restart_attempts: row.get(10)?,
-        restart_not_before_unix_secs: row.get(11)?,
-        running_since_unix_secs: row.get(12)?,
-        created_at_unix_secs: row.get(13)?,
-        updated_at_unix_secs: row.get(14)?,
+        container_ip: row.get(6)?,
+        exit_code: row.get(7)?,
+        error: row.get(8)?,
+        stopping_since_unix_secs: row.get(9)?,
+        runtime_unknown_since_unix_secs: row.get(10)?,
+        restart_attempts: row.get(11)?,
+        restart_not_before_unix_secs: row.get(12)?,
+        running_since_unix_secs: row.get(13)?,
+        created_at_unix_secs: row.get(14)?,
+        updated_at_unix_secs: row.get(15)?,
     })
 }
 
 fn run_from_row(row: &Row<'_>) -> rusqlite::Result<WorkloadRun> {
-    let cleanup_state: String = row.get(2)?;
+    let cleanup_state: String = row.get(3)?;
     Ok(WorkloadRun {
         workload_id: row.get(0)?,
         runtime_task_id: row.get(1)?,
+        container_ip: row.get(2)?,
         cleanup_state: CleanupState::from_str(&cleanup_state)
             .ok_or_else(|| invalid_text("cleanup_state", &cleanup_state))?,
-        cleanup_attempts: row.get(3)?,
-        last_cleanup_error: row.get(4)?,
-        updated_at_unix_secs: row.get(5)?,
+        cleanup_attempts: row.get(4)?,
+        last_cleanup_error: row.get(5)?,
+        updated_at_unix_secs: row.get(6)?,
+        container_released: row.get(7)?,
+        release_attempts: row.get(8)?,
+        last_release_error: row.get(9)?,
     })
 }
 

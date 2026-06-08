@@ -111,7 +111,9 @@ impl WorkloadService for Agent {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:50052".parse()?;
-    let runtime = Arc::new(ContainerdRuntime::default());
+    let runtime = Arc::new(
+        ContainerdRuntime::from_env().map_err(|error| error as Box<dyn std::error::Error>)?,
+    );
     let workloads = WorkloadManager::open(runtime)?;
     tokio::spawn(workloads.clone().run_watch_loop());
     tokio::spawn(workloads.clone().run_reconcile_loop());

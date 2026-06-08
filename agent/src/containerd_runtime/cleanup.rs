@@ -1,3 +1,4 @@
+use super::network::NetworkConfig;
 use super::{NAMESPACE, RuntimeResult, SNAPSHOTTER, runtime_error};
 use containerd_client::services::v1::snapshots::RemoveSnapshotRequest;
 use containerd_client::services::v1::{DeleteContainerRequest, DeleteTaskRequest};
@@ -11,28 +12,44 @@ pub(super) struct RunCleanup {
     task_id: String,
     snapshot_key: String,
     run_dir: PathBuf,
+    network: NetworkConfig,
+    network_created: bool,
     task_created: bool,
     container_created: bool,
     snapshot_created: bool,
 }
 
 impl RunCleanup {
-    pub(super) fn new(task_id: String, snapshot_key: String, run_dir: PathBuf) -> Self {
+    pub(super) fn new(
+        task_id: String,
+        snapshot_key: String,
+        run_dir: PathBuf,
+        network: NetworkConfig,
+    ) -> Self {
         Self {
             task_id,
             snapshot_key,
             run_dir,
+            network,
+            network_created: false,
             task_created: false,
             container_created: false,
             snapshot_created: false,
         }
     }
 
-    pub(super) fn existing(task_id: String, snapshot_key: String, run_dir: PathBuf) -> Self {
+    pub(super) fn existing(
+        task_id: String,
+        snapshot_key: String,
+        run_dir: PathBuf,
+        network: NetworkConfig,
+    ) -> Self {
         Self {
             task_id,
             snapshot_key,
             run_dir,
+            network,
+            network_created: true,
             task_created: true,
             container_created: true,
             snapshot_created: true,
@@ -47,11 +64,15 @@ impl RunCleanup {
         self.container_created = true;
     }
 
+    pub(super) fn mark_network_created(&mut self) {
+        self.network_created = true;
+    }
+
     pub(super) fn mark_snapshot_created(&mut self) {
         self.snapshot_created = true;
     }
 
-    pub(super) async fn cleanup(self, client: &Client, remove_run_dir: bool) -> RuntimeResult<()> {
+    pub(super) async fn release(&self, client: &Client) -> RuntimeResult<()> {
         let mut errors = Vec::new();
 
         if self.task_created {
@@ -88,6 +109,16 @@ impl RunCleanup {
             }
         }
 
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(runtime_error(errors.join("; ")))
+        }
+    }
+
+    pub(super) async fn prune(&self, client: &Client, remove_run_dir: bool) -> RuntimeResult<()> {
+        let mut errors = Vec::new();
+
         if self.snapshot_created {
             let mut snapshots = client.snapshots();
             if let Err(error) = snapshots
@@ -104,6 +135,26 @@ impl RunCleanup {
                     errors.push(format!(
                         "remove snapshot {} failed: {error}",
                         self.snapshot_key
+                    ));
+                }
+            }
+        }
+
+        if self.network_created {
+            let network = self.network.clone();
+            let task_id = self.task_id.clone();
+            match tokio::task::spawn_blocking(move || network.cleanup(&task_id)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    errors.push(format!(
+                        "cleanup CNI network {} failed: {error}",
+                        self.task_id
+                    ));
+                }
+                Err(error) => {
+                    errors.push(format!(
+                        "cleanup CNI network {} task panicked: {error}",
+                        self.task_id
                     ));
                 }
             }

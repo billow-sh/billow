@@ -3,14 +3,16 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 root := justfile_directory()
 containerd_version := `dasel query -i toml -o json 'containerd.version' < vendor.toml | tr -d '"'`
 crun_version := `dasel query -i toml -o json 'crun.version' < vendor.toml | tr -d '"'`
+cni_plugins_version := `dasel query -i toml -o json 'cni_plugins.version' < vendor.toml | tr -d '"'`
 linux_musl_target := `case "$(uname -m)" in arm64|aarch64) echo aarch64-unknown-linux-musl ;; x86_64|amd64) echo x86_64-unknown-linux-musl ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac`
 linux_arch := `case "$(uname -m)" in arm64|aarch64) echo arm64 ;; x86_64|amd64) echo amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac`
 containerd_sha256 := `case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac; dasel query -i toml -o json "containerd.sha256.${arch}" < vendor.toml | tr -d '"'`
 crun_sha256 := `case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac; dasel query -i toml -o json "crun.sha256.${arch}" < vendor.toml | tr -d '"'`
+cni_plugins_sha256 := `case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) echo "unsupported host architecture: $(uname -m)" >&2; exit 1 ;; esac; dasel query -i toml -o json "cni_plugins.sha256.${arch}" < vendor.toml | tr -d '"'`
 archive := "billow-" + linux_musl_target + ".tar.gz"
 stable_archive := "billow.tar.gz"
 stage_dir := root + "/target/billow-assemble/" + linux_musl_target
-vendor_dir := root + "/.cache/vendor/linux-" + linux_arch + "/containerd-static-" + containerd_version + "-crun-" + crun_version
+vendor_dir := root + "/.cache/vendor/linux-" + linux_arch + "/containerd-static-" + containerd_version + "-crun-" + crun_version + "-cni-plugins-" + cni_plugins_version
 vendor_download_dir := vendor_dir + "/downloads"
 vendor_extract_dir := vendor_dir + "/extract"
 vendor_bin_dir := vendor_dir + "/bin"
@@ -20,6 +22,9 @@ containerd_url := "https://github.com/containerd/containerd/releases/download/v"
 crun_download := "crun-" + crun_version + "-linux-" + linux_arch
 crun_download_path := vendor_download_dir + "/" + crun_download
 crun_url := "https://github.com/containers/crun/releases/download/" + crun_version + "/" + crun_download
+cni_plugins_archive := "cni-plugins-linux-" + linux_arch + "-v" + cni_plugins_version + ".tgz"
+cni_plugins_archive_path := vendor_download_dir + "/" + cni_plugins_archive
+cni_plugins_url := "https://github.com/containernetworking/plugins/releases/download/v" + cni_plugins_version + "/" + cni_plugins_archive
 vm_pool_dir := root + "/target/vm-pool"
 vm_pool_socket := vm_pool_dir + "/vm-pool.sock"
 vm_pool_pid := vm_pool_dir + "/vm-pool.pid"
@@ -36,7 +41,11 @@ assemble: _build-linux-musl vendor
     install -m 0755 "{{vendor_bin_dir}}/containerd" "{{stage_dir}}/containerd"
     install -m 0755 "{{vendor_bin_dir}}/containerd-shim-runc-v2" "{{stage_dir}}/containerd-shim-runc-v2"
     install -m 0755 "{{vendor_bin_dir}}/crun" "{{stage_dir}}/crun"
-    COPYFILE_DISABLE=1 tar --no-xattrs -C "{{stage_dir}}" -czf "{{root}}/target/{{archive}}" billow-agent billow-init containerd containerd-shim-runc-v2 crun
+    mkdir -p "{{stage_dir}}/cni"
+    install -m 0755 "{{vendor_bin_dir}}/cni/bridge" "{{stage_dir}}/cni/bridge"
+    install -m 0755 "{{vendor_bin_dir}}/cni/host-local" "{{stage_dir}}/cni/host-local"
+    install -m 0755 "{{vendor_bin_dir}}/cni/loopback" "{{stage_dir}}/cni/loopback"
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "{{stage_dir}}" -czf "{{root}}/target/{{archive}}" billow-agent billow-init containerd containerd-shim-runc-v2 crun cni
     cp "{{root}}/target/{{archive}}" "{{root}}/target/{{stable_archive}}"
     install -m 0755 "{{root}}/install.sh" "{{root}}/target/install.sh"
     @printf '%s\n' "WARNING: Billow tarballs are for development and internal testing only. Do not redistribute until third-party license and notice distribution is implemented." >&2
@@ -66,6 +75,20 @@ vendor:
     printf '%s  %s\n' "{{crun_sha256}}" "{{crun_download_path}}" | shasum -a 256 -c -
     if [[ ! -x "{{vendor_bin_dir}}/crun" ]]; then \
         install -m 0755 "{{crun_download_path}}" "{{vendor_bin_dir}}/crun"; \
+    fi
+    if [[ ! -f "{{cni_plugins_archive_path}}" ]]; then \
+        curl -fL --retry 3 -o "{{cni_plugins_archive_path}}.tmp" "{{cni_plugins_url}}"; \
+        printf '%s  %s\n' "{{cni_plugins_sha256}}" "{{cni_plugins_archive_path}}.tmp" | shasum -a 256 -c -; \
+        mv "{{cni_plugins_archive_path}}.tmp" "{{cni_plugins_archive_path}}"; \
+    fi
+    printf '%s  %s\n' "{{cni_plugins_sha256}}" "{{cni_plugins_archive_path}}" | shasum -a 256 -c -
+    if [[ ! -x "{{vendor_bin_dir}}/cni/bridge" || ! -x "{{vendor_bin_dir}}/cni/host-local" || ! -x "{{vendor_bin_dir}}/cni/loopback" ]]; then \
+        rm -rf "{{vendor_extract_dir}}/cni-plugins"; \
+        mkdir -p "{{vendor_extract_dir}}/cni-plugins" "{{vendor_bin_dir}}/cni"; \
+        tar -xzf "{{cni_plugins_archive_path}}" -C "{{vendor_extract_dir}}/cni-plugins"; \
+        install -m 0755 "{{vendor_extract_dir}}/cni-plugins/bridge" "{{vendor_bin_dir}}/cni/bridge"; \
+        install -m 0755 "{{vendor_extract_dir}}/cni-plugins/host-local" "{{vendor_bin_dir}}/cni/host-local"; \
+        install -m 0755 "{{vendor_extract_dir}}/cni-plugins/loopback" "{{vendor_bin_dir}}/cni/loopback"; \
     fi
 
 _build-linux-musl:

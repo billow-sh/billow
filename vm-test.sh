@@ -120,7 +120,7 @@ install_script_url="http://${host_ip}:${port}/${install_script}"
 
 echo "Using BILLOW_INSTALL_URL=$install_url" >&2
 multipass exec "$vm_name" -- bash -lc "printf '%s\n' 'export BILLOW_INSTALL_URL=$install_url' >> ~/.bashrc"
-multipass exec "$vm_name" -- bash -lc "export BILLOW_INSTALL_URL='$install_url'; curl -fsSL '$install_script_url' | bash"
+multipass exec "$vm_name" -- timeout 300 bash -lc "export BILLOW_INSTALL_URL='$install_url'; curl -fsSL '$install_script_url' | bash"
 
 vm_ip="$(extract_vm_ip)"
 if [[ -z "$vm_ip" ]]; then
@@ -149,6 +149,11 @@ if [[ "$actual" != "$message" ]]; then
     echo "expected '$message', got '${actual:-<no response>}'" >&2
     exit 1
 fi
+
+echo "Checking installed CNI plugins" >&2
+multipass exec "$vm_name" -- test -x /usr/local/lib/billow/bin/cni/bridge
+multipass exec "$vm_name" -- test -x /usr/local/lib/billow/bin/cni/host-local
+multipass exec "$vm_name" -- test -x /usr/local/lib/billow/bin/cni/loopback
 
 echo "Testing once workload hello-world" >&2
 hello_id="$(run_cli workload submit once hello-world)"
@@ -194,6 +199,20 @@ done
 
 if [[ "$nginx_status" != *"actual_state=running"* ]]; then
     echo "expected nginx workload to reach running, got '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+if [[ "$nginx_status" != *"container_ip=10.1.1."* ]]; then
+    echo "expected nginx workload to have a 10.1.1.x container_ip, got '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+nginx_ip="$(awk -F= '/^container_ip=/ {print $2; exit}' <<<"$nginx_status")"
+if [[ -z "$nginx_ip" ]]; then
+    echo "could not extract nginx container_ip from '${nginx_status:-<no response>}'" >&2
+    exit 1
+fi
+multipass exec "$vm_name" -- bash -lc "test -d /sys/class/net/billow0"
+if ! nginx_http="$(multipass exec "$vm_name" -- bash -lc "timeout 10 curl -fsS --max-time 10 'http://${nginx_ip}/'" 2>&1)"; then
+    echo "expected nginx to be reachable at $nginx_ip, got '${nginx_http:-<no response>}'" >&2
     exit 1
 fi
 
